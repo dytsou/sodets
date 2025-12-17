@@ -145,7 +145,7 @@ func main() {
 	responseService := response.NewService(logger, dbPool)
 	submitService := submit.NewService(logger, formService, questionService, responseService)
 	publishService := publish.NewService(logger, distributeService, formService, inboxService)
-	geminiService := gemini.NewService(logger, cfg.GeminiAPIKey, cfg.ErrLogPath)
+	geminiService := gemini.NewService(logger, cfg.LLMAPIBaseURL, cfg.LLMAPIKey, cfg.LLMModel, cfg.ErrLogPath)
 
 	// Handler
 	authHandler := auth.NewHandler(logger, validator, problemWriter, userService, jwtService, jwtService, cfg.BaseURL, cfg.OauthProxyBaseURL, Environment, cfg.Dev, cfg.AccessTokenExpiration, cfg.RefreshTokenExpiration, cfg.GoogleOauth)
