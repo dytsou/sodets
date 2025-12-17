@@ -15,7 +15,8 @@ prepare:
 run:
 	@echo -e ":: $(GREEN)Starting backend...$(NC)"
 	@go build -o bin/backend cmd/backend/main.go && \
-		DEBUG=true ./bin/backend \
+		DEBUG=false ./bin/backend \
+		| vector --config ./observe/vector.toml \
 		&& echo -e "==> $(BLUE)Successfully shut down backend$(NC)" \
 		|| (echo -e "==> $(RED)Backend failed to start $(NC)" && exit 1)
 

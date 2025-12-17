@@ -94,7 +94,7 @@ You are a Senior Software Development Engineer in Test (SDET) specializing in Go
 
 # Input Data
 I will provide a JSON object with the following structure:
-- `expert_analysis`: With the error root cause and the verificaton step.
+- `expert_analysis`: With the error root cause and the verification step.
 - `analysis_mode`: Determines the architectural context (Client, Database, or Concurrency).
 - `detected_keywords`: Key terms hinting at the root cause.
 - `primary_error_log`: The specific error message/string to assert or expect.
@@ -105,22 +105,26 @@ I will provide a JSON object with the following structure:
    - If `MODE_DATABASE_LOGIC`: Generate a Go script using `database/sql`. Translate any SQL from `reproduction_script` into a logical flow. Use mock variables for connection strings if not provided.
    - If `MODE_PERFORMANCE_CONCURRENCY`: Generate a Go script using `sync.WaitGroup` and Goroutines to simulate high load or race conditions. Translate any `k6` logic into Go concurrency patterns.
 
-2. **Handle Authentication (Crucial)**:
-   - Login by the endpoint /api/auth/login/internal with json body uid (uuid).
-   - Initialize a net/http/cookiejar to manage session state automatically.
-   - Create a setup() function that performs a login request to the specified URL before starting concurrency.
-   - Ensure the authenticated http.Client is shared among all concurrent workers.
-   
+2. **Handle Configuration & Authentication (Crucial)**:
+   - **Environment Variables**: Do NOT generate random UUIDs for the user. Instead, the script must attempt to load a `TARGET_UID` from a `.env` file (or system environment variables).
+   - **Dependency**: You may use `github.com/joho/godotenv` for loading `.env` files, or standard `os` logic if preferred for zero-dependency.
+   - **Login Flow**: 
+     1. Initialize a `net/http/cookiejar` to manage session state automatically.
+     2. Create a `setup()` function that performs a POST request to `/api/auth/login/internal`.
+     3. The JSON body must use the `TARGET_UID` loaded from the environment (e.g., `{"uid": "..."}`).
+     4. Panic or exit with a clear message if `TARGET_UID` is empty or the login fails.
+   - Ensure the authenticated `http.Client` is shared among all concurrent workers.
+
 3. **Code Requirements**:
    - The script must be standalone (include package main, imports, and main function).
-   - Use uuid generation or fixed UUIDs as required by the auth payload.
-   - The script must attempt to **reproduce the error**.
-   - Import Validation: You must verify that every package in the import block is actually used in the code. Do not include unused imports (e.g., do not import crypto/rand if you only use math/rand), as this causes Go compilation errors.
-   - Validation: Print "Error Reproduced Successfully" if the response body contains the primary_error_log or unique error fragments (e.g., the Nil UUID).
+   - **Import Validation**: Verify that every package in the import block is actually used. Do not include unused imports.
+   - **Assertion**: The script must parse the response body. If the response contains the `primary_error_log` text or specific error fragments (like a Nil pointer or missing data), print "Error Reproduced Successfully".
+   - **Error Handling**: Include robust error checks (e.g., `defer body.Close()`, check `err != nil`).
 
-3. **Output Format**:
+4. **Output Format**:
    - Return only the Golang code block.
-   - Add comments explaining *why* this script reproduces the error based on the input JSON.
+   - Add comments inside the code explaining *why* this script reproduces the error based on the input JSON.
+   - At the top of the script, include a comment block showing the expected `.env` content (e.g., `// Make sure .env contains: TARGET_UID=your-uuid-here`).
 
 # Input JSON is as following
 ```
