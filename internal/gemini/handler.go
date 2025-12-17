@@ -23,6 +23,10 @@ const (
 	maxUploadSizeBytes = 1 << 20 // 1MB cap for uploaded text files
 )
 
+type ErrorReproducerRequest struct {
+	Path string `json:"path"`
+}
+
 type RegenerateResponse struct {
 	Eval    EvaluateResult  `json:"eval"`
 	Attempt int             `json:"attempt"`
@@ -602,8 +606,15 @@ func (h *Handler) ErrorReproducerHandler(w http.ResponseWriter, r *http.Request)
 	logger := logutil.WithContext(traceCtx, h.logger)
 
 	// 1) Read log file content
-	logFilePath := "errorlogs/incident_0001_59e41abb.json" // Example: you can get this from request body
-	logContent, err := os.ReadFile(logFilePath)
+	var req ErrorReproducerRequest
+	err := handlerutil.ParseAndValidateRequestBody(traceCtx, h.validator, r, &req)
+	if err != nil {
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
+		return
+	}
+
+	path := req.Path
+	logContent, err := os.ReadFile(path)
 	if err != nil {
 		h.problemWriter.WriteError(traceCtx, w, fmt.Errorf("failed to read log file: %w", err), logger)
 		return
