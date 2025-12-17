@@ -17,18 +17,6 @@ type GeminiAPIRequest struct {
 	Contents []Content `json:"contents"`
 }
 
-// OpenRouterMessage represents a single message in an OpenRouter chat request
-type OpenRouterMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-// OpenRouterChatRequest represents the request format for OpenRouter chat completions
-type OpenRouterChatRequest struct {
-	Model    string              `json:"model"`
-	Messages []OpenRouterMessage `json:"messages"`
-}
-
 // Content represents a content object in Gemini API request
 type Content struct {
 	Parts []Part `json:"parts"`
@@ -52,56 +40,6 @@ func (r *Request) ToGeminiAPIRequest() GeminiAPIRequest {
 				},
 			},
 		},
-	}
-}
-
-// ToOpenRouterRequest converts a GeminiAPIRequest into an OpenRouterChatRequest
-// by mapping each Gemini Content into a chat message.
-func (r GeminiAPIRequest) ToOpenRouterRequest(model string) OpenRouterChatRequest {
-	messages := make([]OpenRouterMessage, 0, len(r.Contents))
-
-	for _, c := range r.Contents {
-		if len(c.Parts) == 0 {
-			continue
-		}
-
-		var parts []string
-		for _, p := range c.Parts {
-			if strings.TrimSpace(p.Text) != "" {
-				parts = append(parts, p.Text)
-			}
-		}
-		if len(parts) == 0 {
-			continue
-		}
-
-		role := strings.ToLower(strings.TrimSpace(c.Role))
-		if role == "" {
-			role = "user"
-		}
-
-		messages = append(messages, OpenRouterMessage{
-			Role:    role,
-			Content: strings.Join(parts, "\n"),
-		})
-	}
-
-	// Fallback: if we somehow didn't construct any messages, send the raw request as a single user message.
-	if len(messages) == 0 {
-		rawBytes, err := json.Marshal(r)
-		raw := ""
-		if err == nil {
-			raw = string(rawBytes)
-		}
-		messages = append(messages, OpenRouterMessage{
-			Role:    "user",
-			Content: raw,
-		})
-	}
-
-	return OpenRouterChatRequest{
-		Model:    model,
-		Messages: messages,
 	}
 }
 
@@ -155,19 +93,6 @@ func (g *GeminiAPIResponse) ToResponse() Response {
 	return Response{
 		Text: "",
 	}
-}
-
-// OpenRouterChatCompletionResponse represents a minimal subset of the OpenRouter
-// chat completions response that we care about.
-type OpenRouterChatCompletionResponse struct {
-	Choices []struct {
-		Message struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
-		} `json:"message"`
-		Index        int    `json:"index,omitempty"`
-		FinishReason string `json:"finish_reason,omitempty"`
-	} `json:"choices"`
 }
 
 // AnalysisMode represents the classification mode from triage stage

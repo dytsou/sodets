@@ -39,10 +39,7 @@ type Config struct {
 	AllowOrigins              []string                `yaml:"allow_origins"      envconfig:"ALLOW_ORIGINS"`
 	GoogleOauth               googleOauth.GoogleOauth `yaml:"google_oauth"`
 	GeminiAPIKey              string                  `yaml:"gemini_api_key"      envconfig:"GEMINI_API_KEY"`
-	LLMAPIBaseURL             string                  `yaml:"llm_api_base_url"    envconfig:"LLM_API_BASE_URL"`
-	LLMAPIKey                 string                  `yaml:"llm_api_key"         envconfig:"LLM_API_KEY"`
-	LLMModel                  string                  `yaml:"llm_model"           envconfig:"LLM_MODEL"`
-	ErrLogPath                string                  `yaml:"err_log_path"        envconfig:"ERR_LOG_PATH"`
+	ErrLogPath                string                  `yaml:"err_log_path"   envconfig:"ERR_LOG_PATH"`
 	AccessTokenExpiration     time.Duration           `yaml:"-"`
 	RefreshTokenExpiration    time.Duration           `yaml:"-"`
 }
@@ -139,9 +136,6 @@ func Load() (Config, *LogBuffer) {
 		OtelCollectorUrl:          "",
 		GoogleOauth:               googleOauth.GoogleOauth{},
 		GeminiAPIKey:              "",
-		LLMAPIBaseURL:             "",
-		LLMAPIKey:                 "",
-		LLMModel:                  "",
 		ErrLogPath:                "",
 	}
 
@@ -212,9 +206,7 @@ func FromEnv(config *Config, logger *LogBuffer) (*Config, error) {
 		DatabaseURL:       os.Getenv("DATABASE_URL"),
 		MigrationSource:   os.Getenv("MIGRATION_SOURCE"),
 		OtelCollectorUrl:  os.Getenv("OTEL_COLLECTOR_URL"),
-		LLMAPIBaseURL:     os.Getenv("LLM_API_BASE_URL"),
-		LLMAPIKey:         os.Getenv("LLM_API_KEY"),
-		LLMModel:          os.Getenv("LLM_MODEL"),
+		GeminiAPIKey:      os.Getenv("GEMINI_API_KEY"),
 		GoogleOauth: googleOauth.GoogleOauth{
 			ClientID:     os.Getenv("GOOGLE_OAUTH_CLIENT_ID"),
 			ClientSecret: os.Getenv("GOOGLE_OAUTH_CLIENT_SECRET"),

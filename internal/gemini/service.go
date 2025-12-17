@@ -18,70 +18,44 @@ import (
 )
 
 const (
-	repoAPI   = "https://api.github.com/repos/NYCU-SDC/core-system-backend/contents/internal"
-	summerAPI = "https://api.github.com/repos/NYCU-SDC/summer/contents/pkg"
-)
-
-var (
-	llmAPIBaseURL = os.Getenv("LLM_API_BASE_URL")
-	llmModel      = os.Getenv("LLM_MODEL")
+	geminiAPIBaseURL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+	repoAPI          = "https://api.github.com/repos/NYCU-SDC/core-system-backend/contents/internal"
+	summerAPI        = "https://api.github.com/repos/NYCU-SDC/summer/contents/pkg"
 )
 
 type Service struct {
-	logger     *zap.Logger
-	tracer     trace.Tracer
-	apiBaseURL string
-	apiKey     string
-	model      string
-	logPath    string
-	client     *http.Client
+	logger  *zap.Logger
+	tracer  trace.Tracer
+	apiKey  string
+	logPath string
+	client  *http.Client
 }
 
-func NewService(logger *zap.Logger, apiBaseURL, apiKey, model, logPath string) *Service {
+func NewService(logger *zap.Logger, apiKey string, logPath string) *Service {
 	return &Service{
-		logger:     logger,
-		tracer:     otel.Tracer("gemini/service"),
-		apiBaseURL: strings.TrimSpace(apiBaseURL),
-		apiKey:     strings.TrimSpace(apiKey),
-		model:      strings.TrimSpace(model),
-		logPath:    logPath,
-		client:     &http.Client{},
+		logger:  logger,
+		tracer:  otel.Tracer("gemini/service"),
+		apiKey:  apiKey,
+		logPath: logPath,
+		client:  &http.Client{},
 	}
 }
 
-// Chat sends a request to the configured LLM API (OpenRouter-compatible)
-// and returns a simplified Response.
+// Chat sends a request to the Gemini API and returns the response
 func (s *Service) Chat(ctx context.Context, req GeminiAPIRequest) (Response, error) {
 	traceCtx, span := s.tracer.Start(ctx, "Chat")
 	defer span.End()
 	logger := logutil.WithContext(traceCtx, s.logger)
 
 	if s.apiKey == "" {
-		err := fmt.Errorf("LLM API key is not configured")
-		logger.Error("LLM API key is missing", zap.Error(err))
+		err := fmt.Errorf("gemini API key is not configured")
+		logger.Error("gemini API key is missing", zap.Error(err))
 		span.RecordError(err)
 		return Response{}, err
 	}
-
-	if strings.TrimSpace(s.apiBaseURL) == "" {
-		err := fmt.Errorf("LLM_API_BASE_URL is not configured")
-		logger.Error("LLM API base URL is missing", zap.Error(err))
-		span.RecordError(err)
-		return Response{}, err
-	}
-
-	if strings.TrimSpace(s.model) == "" {
-		err := fmt.Errorf("LLM_MODEL is not configured")
-		logger.Error("LLM model is missing", zap.Error(err))
-		span.RecordError(err)
-		return Response{}, err
-	}
-
-	// Convert Gemini-style request into an OpenRouter chat request
-	openRouterReq := req.ToOpenRouterRequest(s.model)
 
 	// Marshal request to JSON
-	reqBody, err := json.Marshal(openRouterReq)
+	reqBody, err := json.Marshal(req)
 	if err != nil {
 		logger.Error("failed to marshal request", zap.Error(err))
 		span.RecordError(err)
@@ -89,7 +63,7 @@ func (s *Service) Chat(ctx context.Context, req GeminiAPIRequest) (Response, err
 	}
 
 	// Create HTTP request
-	url := s.apiBaseURL
+	url := fmt.Sprintf("%s?key=%s", geminiAPIBaseURL, s.apiKey)
 	httpReq, err := http.NewRequestWithContext(traceCtx, http.MethodPost, url, bytes.NewBuffer(reqBody))
 	if err != nil {
 		logger.Error("failed to create HTTP request", zap.Error(err))
@@ -98,15 +72,14 @@ func (s *Service) Chat(ctx context.Context, req GeminiAPIRequest) (Response, err
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", s.apiKey))
 
 	// Send request
-	logger.Info("sending request to LLM API", zap.String("url", url))
+	logger.Info("sending request to Gemini API", zap.String("url", url))
 	resp, err := s.client.Do(httpReq)
 	if err != nil {
-		logger.Error("failed to send request to LLM API", zap.Error(err))
+		logger.Error("failed to send request to Gemini API", zap.Error(err))
 		span.RecordError(err)
-		return Response{}, fmt.Errorf("failed to send request to LLM API: %w", err)
+		return Response{}, fmt.Errorf("failed to send request to Gemini API: %w", err)
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
@@ -124,8 +97,8 @@ func (s *Service) Chat(ctx context.Context, req GeminiAPIRequest) (Response, err
 
 	// Check status code
 	if resp.StatusCode != http.StatusOK {
-		err := fmt.Errorf("LLM API returned status %d: %s", resp.StatusCode, string(body))
-		logger.Error("LLM API returned error",
+		err := fmt.Errorf("gemini API returned status %d: %s", resp.StatusCode, string(body))
+		logger.Error("Gemini API returned error",
 			zap.Int("status_code", resp.StatusCode),
 			zap.String("response", string(body)),
 		)
@@ -133,21 +106,25 @@ func (s *Service) Chat(ctx context.Context, req GeminiAPIRequest) (Response, err
 		return Response{}, err
 	}
 
-	// Parse OpenRouter chat completion response
-	var orResp OpenRouterChatCompletionResponse
-	if err := json.Unmarshal(body, &orResp); err != nil {
-		logger.Error("failed to unmarshal LLM response", zap.Error(err), zap.String("body", string(body)))
+	// Parse response
+	var geminiResp GeminiAPIResponse
+	if err := json.Unmarshal(body, &geminiResp); err != nil {
+		logger.Error("failed to unmarshal response", zap.Error(err), zap.String("body", string(body)))
 		span.RecordError(err)
-		return Response{}, fmt.Errorf("failed to unmarshal LLM response: %w", err)
+		return Response{}, fmt.Errorf("failed to unmarshal response: %w", err)
 	}
 
-	var text string
-	if len(orResp.Choices) > 0 {
-		text = orResp.Choices[0].Message.Content
+	// Check for blocked content
+	if geminiResp.PromptFeedback != nil && geminiResp.PromptFeedback.BlockReason != "" {
+		err := fmt.Errorf("prompt was blocked: %s", geminiResp.PromptFeedback.BlockReason)
+		logger.Error("prompt was blocked", zap.String("reason", geminiResp.PromptFeedback.BlockReason))
+		span.RecordError(err)
+		return Response{}, err
 	}
 
-	response := Response{Text: text}
-	logger.Info("successfully received response from LLM API", zap.String("text_length", fmt.Sprintf("%d", len(response.Text))))
+	// Convert to simplified response
+	response := geminiResp.ToResponse()
+	logger.Info("successfully received response from Gemini API", zap.String("text_length", fmt.Sprintf("%d", len(response.Text))))
 
 	return response, nil
 }
