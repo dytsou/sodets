@@ -745,6 +745,11 @@ async def main():
     with open(output_filepath, 'w', encoding='utf-8') as f:
         json.dump(incident_data, f, indent=2, ensure_ascii=False)
     
+    # Output absolute path as JSON to stdout
+    absolute_path = os.path.abspath(output_filepath)
+    output_result = {"output_file": absolute_path}
+    print(json.dumps(output_result, ensure_ascii=False))
+    
     logger.info(f"Report generated: {output_filename}")
 
 if __name__ == "__main__":

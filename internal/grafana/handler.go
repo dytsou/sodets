@@ -16,12 +16,16 @@ import (
 )
 
 type Store interface {
-	Collect(ctx context.Context, startAt string) error
+	Collect(ctx context.Context, startAt string) (*ScriptOutput, error)
 }
 
 type Request struct {
     // Status     string `json:"status"`
     StartAt  string `json:"start_at" validate:"required"`
+}
+
+type Response struct {
+    FilePath string `json:"file_path"`
 }
 
 type Handler struct {
@@ -63,13 +67,13 @@ func (h *Handler) CollectHandler(w http.ResponseWriter, r *http.Request) {
     defer cancel()
 
     // Call the service
-    err = h.store.Collect(ctx, req.StartAt)
+    result, err := h.store.Collect(ctx, req.StartAt)
     if err != nil {
         h.problemWriter.WriteError(traceCtx, w, fmt.Errorf("data collection failed: %w", err), logger)
         return
     }
 
-    logger.Info("Data collection completed successfully")
+    logger.Info("Data collection completed successfully", zap.String("output_file", result.OutputFile))
 
-    handlerutil.WriteJSONResponse(w, http.StatusOK, nil)
+    handlerutil.WriteJSONResponse(w, http.StatusOK, Response{FilePath: result.OutputFile})
 }

@@ -16,3 +16,7 @@ type ScanSettings struct {
     ContextWindowSeconds int `json:"context_window_seconds"`
     MaxConcurrentTasks   int `json:"max_concurrent_tasks"`
 }
+
+type ScriptOutput struct {
+    OutputFile string `json:"output_file"`
+}

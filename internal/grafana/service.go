@@ -60,7 +60,7 @@ func toScriptInput(endAtStr string, outputDir string) (ScriptInput, error) {
 	}, nil
 }
 
-func (s *Service) Collect(ctx context.Context, endAt string) error {
+func (s *Service) Collect(ctx context.Context, endAt string) (*ScriptOutput, error) {
 	traceCtx, span := s.tracer.Start(ctx, "Collect")
 	defer span.End()
 	logger := logutil.WithContext(traceCtx, s.logger)
@@ -75,7 +75,7 @@ func (s *Service) Collect(ctx context.Context, endAt string) error {
 	if err != nil {
 		logger.Error("failed to generate script input", zap.Error(err))
 		span.RecordError(err)
-		return err
+		return nil, err
 	}
 
 	cmd := exec.CommandContext(traceCtx, s.pythonExec, s.scriptPath)
@@ -84,7 +84,7 @@ func (s *Service) Collect(ctx context.Context, endAt string) error {
 	if err != nil {
 		logger.Error("failed to marshal input", zap.Error(err))
 		span.RecordError(err)
-		return fmt.Errorf("failed to marshal input: %w", err)
+		return nil, fmt.Errorf("failed to marshal input: %w", err)
 	}
 
 	logger.Info("marshalled input data",
@@ -109,14 +109,28 @@ func (s *Service) Collect(ctx context.Context, endAt string) error {
 			zap.String("stderr", stderrStr),
 		)
 		span.RecordError(err)
-		return fmt.Errorf("python script execution failed: %s, stderr: %s", err, stderrStr)
+		return nil, fmt.Errorf("python script execution failed: %s, stderr: %s", err, stderrStr)
 	}
 
-	if stdout.Len() > 0 {
-		logger.Info("python script output (stdout)", zap.String("stdout", stdout.String()))
+	stdoutStr := stdout.String()
+	if len(stdoutStr) > 0 {
+		logger.Info("python script output (stdout)", zap.String("stdout", stdoutStr))
 	}
 
-	logger.Info("python script executed successfully")
+	// Parse JSON output from stdout
+	var scriptOutput ScriptOutput
+	if err := json.Unmarshal([]byte(stdoutStr), &scriptOutput); err != nil {
+		logger.Error("failed to parse script output",
+			zap.Error(err),
+			zap.String("stdout", stdoutStr),
+		)
+		span.RecordError(err)
+		return nil, fmt.Errorf("failed to parse script output: %w", err)
+	}
 
-	return nil
+	logger.Info("python script executed successfully",
+		zap.String("output_file", scriptOutput.OutputFile),
+	)
+
+	return &scriptOutput, nil
 }
