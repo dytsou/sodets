@@ -14,9 +14,12 @@ Important:
   - POST /api/auth/login/internal
   - Use net/http/cookiejar
   - Shared authenticated http.Client
-  - the service base url should be http://localhost:8080
-- Keep the success marker EXACT:
-  - The script MUST print the exact string: "Error Reproduced Successfully"
+  - the BASE_URL should be http://localhost:8080
+- Output the actual error message found:
+  - Parse response JSON following RFC 7807 Problem Details format (fields: title, status, type, detail)
+  - Check the "detail" field for error messages
+  - When error is found, print the actual error text from "detail" field (e.g., "unable to find tenants with id '00000000-0000-0000-0000-000000000000'")
+  - Do NOT use generic markers like "Error Reproduced Successfully"
 - Use ONLY Go standard library (no external deps).
 - The output MUST be a single, standalone Go program.
 - Output ONLY ONE Go code block and nothing else.

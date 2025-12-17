@@ -15,8 +15,12 @@ If the provided evidence includes compile/build failures, you MUST ask to use th
   - POST /api/auth/login/internal
   - Use net/http/cookiejar
   - Shared authenticated http.Client
-- DO NOT change the success marker string:
-  - The script MUST print the exact string: "Error Reproduced Successfully"
+  - the BASE_URL should be http://localhost:8080
+- Output the actual error message:
+  - Parse response JSON following RFC 7807 Problem Details format (fields: title, status, type, detail)
+  - Check the "detail" field for error messages matching {{EXPECTED_ERROR_PATTERN}}
+  - When the expected error is found, print the actual error text from "detail" field
+  - Do NOT use generic markers like "Error Reproduced Successfully" - output the actual error message
 - DO NOT introduce external dependencies beyond the Go standard library.
 - The output MUST be a single, standalone Go program.
 - Output ONLY ONE Go code block and nothing else.
