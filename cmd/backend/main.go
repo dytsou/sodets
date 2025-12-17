@@ -5,6 +5,7 @@ import (
 	"NYCU-SDC/core-system-backend/internal/config"
 	"NYCU-SDC/core-system-backend/internal/cors"
 	"NYCU-SDC/core-system-backend/internal/gemini"
+	"NYCU-SDC/core-system-backend/internal/grafana"
 	"context"
 	"errors"
 	"fmt"
@@ -98,9 +99,11 @@ func main() {
 
 	// Service
 	geminiService := gemini.NewService(logger, cfg.GeminiAPIKey, cfg.ErrLogPath)
+	grafanaService := grafana.NewService(logger, cfg.PythonPath, cfg.GrafanaScriptPath, cfg.ObservabilityDataPath)
 
 	// Handler
 	geminiHandler := gemini.NewHandler(logger, validator, problemWriter, geminiService)
+	grafanaHandler := grafana.NewHandler(logger, validator, problemWriter, grafanaService)
 
 	// Middleware
 	corsMiddleware := cors.NewMiddleware(logger, cfg.AllowOrigins)
@@ -126,6 +129,9 @@ func main() {
 	mux.Handle("GET /api/gemini/caller", basicMiddleware.HandlerFunc(geminiHandler.CallerHandler))
 	mux.Handle("GET /api/gemini/regenerate", basicMiddleware.HandlerFunc(geminiHandler.RegenerateHandler))
 	mux.Handle("GET /api/gemini/error-reproducer", basicMiddleware.HandlerFunc(geminiHandler.ErrorReproducerHandler))
+
+	// Grafana API routes
+	mux.Handle("POST /api/grafana/collect", basicMiddleware.HandlerFunc(grafanaHandler.CollectHandler))
 
 	// handle interrupt signal
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
