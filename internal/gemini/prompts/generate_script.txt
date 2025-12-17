@@ -27,7 +27,7 @@ I will provide a JSON object with the following structure:
 3. **Code Requirements**:
    - The script must be standalone (include package main, imports, and main function).
    - **Import Validation**: Verify that every package in the import block is actually used. Do not include unused imports.
-   - **Assertion**: The script must parse the response body. If the response contains the `primary_error_log` text or specific error fragments (like a Nil pointer or missing data), print "Error Reproduced Successfully".
+   - **Assertion**: The script must parse the response body. HTTP error responses follow RFC 7807 Problem Details format with fields: `title`, `status`, `type`, and `detail`. Check the `detail` field for the error message. If the response contains the `primary_error_log` text or specific error fragments (like a Nil pointer or missing data), **print the actual error message found** (e.g., the `detail` value or `primary_error_log` text). This output will be used to validate successful error reproduction.
    - **Error Handling**: Include robust error checks (e.g., `defer body.Close()`, check `err != nil`).
 
 4. **Output Format**:
@@ -39,9 +39,11 @@ I will provide a JSON object with the following structure:
    Inside the Go code (as a top comment block), include a MANIFEST in JSON-like text:
    MANIFEST:
    - hypothesis: what exact condition will trigger the target error
-   - success_marker: the exact output string used for evaluation
-   - observability: what the script prints for each request (status, key headers, error snippets)
+   - success_marker: the expected error message from `primary_error_log` that should appear in stdout when reproduced
+   - observability: what the script prints for each request (status, key headers, error snippets from `detail` field)
    - failure_buckets: how to interpret outcomes (auth failure / endpoint wrong / no repro / wrong error)
    - knobs: which parameters to tune (workers, duration, endpoint mix, slug strategy)
+   
+   IMPORTANT: When the error is reproduced, the script must output the actual error message to stdout so it can be validated. Do not use generic markers like "Error Reproduced Successfully" - output the actual error text.
 
 # Input JSON is as following

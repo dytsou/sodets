@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Request represents the incoming request to the Gemini API endpoint.
@@ -342,4 +343,95 @@ type TimelineEntry struct {
 }
 type Incident struct {
 	Timeline []interface{} `json:"timeline"`
+}
+
+type FailureType string
+const (
+  FailureNone    FailureType = "NONE"
+  FailureCompile FailureType = "COMPILE"
+  FailureEnv     FailureType = "ENV"
+  FailureRuntime FailureType = "RUNTIME"
+  FailureTimeout FailureType = "TIMEOUT"
+  FailureNoRepro FailureType = "NO_REPRO"
+  FailureWrongHypothesis FailureType = "WRONG_HYPOTHESIS"
+)
+
+type NextAction string
+const (
+  ActionStop     NextAction = "STOP"
+  ActionFixScript NextAction = "FIX_SCRIPT"
+  ActionTune      NextAction = "TUNE"
+  ActionRethink   NextAction = "RETHINK"
+  ActionRerun     NextAction = "RERUN"
+)
+
+type EvaluateResult struct {
+  Reproduced bool
+  NeedRetry  bool
+  Reason     string
+
+  Failure    FailureType
+  Next       NextAction
+  
+  // ExpectedErrors contains error messages/patterns that should appear in output for successful reproduction
+  ExpectedErrors []string
+}
+
+// FixScriptParams contains parameters for fix_script.txt prompt
+type FixScriptParams struct {
+	Stderr        string // Compile/Build error output
+	CurrentScript string // Current Go script that failed to compile
+}
+
+// ToMap converts FixScriptParams to map for prompt template replacement
+func (p FixScriptParams) ToMap() map[string]string {
+	return map[string]string{
+		"STDERR":         p.Stderr,
+		"CURRENT_SCRIPT": p.CurrentScript,
+	}
+}
+
+// RethinkScriptParams contains parameters for rethink_script.txt prompt
+type RethinkScriptParams struct {
+	ExpectedKeywords     string // Error keywords to look for
+	ExpectedEndpoints    string // Endpoint(s) involved
+	ExpectedErrorPattern string // Error pattern description
+	RunSummary           string // Summary of last run
+	ObservationNotes     string // Observed behavior notes
+	CurrentScript        string // Current script that ran but failed to reproduce
+}
+
+// ToMap converts RethinkScriptParams to map for prompt template replacement
+func (p RethinkScriptParams) ToMap() map[string]string {
+	return map[string]string{
+		"EXPECTED_KEYWORDS":      p.ExpectedKeywords,
+		"EXPECTED_ENDPOINTS":     p.ExpectedEndpoints,
+		"EXPECTED_ERROR_PATTERN": p.ExpectedErrorPattern,
+		"RUN_SUMMARY":            p.RunSummary,
+		"OBSERVATION_NOTES":      p.ObservationNotes,
+		"CURRENT_SCRIPT":         p.CurrentScript,
+	}
+}
+
+type RunScriptOptions struct {
+	WorkDir         string        
+	Timeout         time.Duration 
+	Env             []string      
+	MaxOutputBytes  int          
+	StdoutTailBytes int           
+	StderrTailBytes int
+}
+type RunScriptResult struct {
+	Path     string
+	ExitCode int
+	TimedOut bool
+	Duration time.Duration
+
+	Stdout string
+	Stderr string
+
+	StdoutTail string
+	StderrTail string
+
+	LastNonEmptyStdoutLine string
 }

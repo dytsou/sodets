@@ -26,34 +26,6 @@ const (
 	summerAPI        = "https://api.github.com/repos/NYCU-SDC/summer/contents/pkg"
 )
 
-type EvaluateResult struct {
-	Reproduced bool
-	NeedRetry  bool
-	Reason     string
-}
-type RunScriptOptions struct {
-	WorkDir         string        // 可空；建議設成 repo root
-	Timeout         time.Duration // 可空；例如 60s
-	Env             []string      // 額外 env，會 append 到 os.Environ()
-	MaxOutputBytes  int           // stdout/stderr 最大保留 bytes（避免爆）
-	StdoutTailBytes int           // 另外提供 tail，方便丟回 LLM
-	StderrTailBytes int
-}
-type RunScriptResult struct {
-	Path     string
-	ExitCode int
-	TimedOut bool
-	Duration time.Duration
-
-	Stdout string
-	Stderr string
-
-	StdoutTail string
-	StderrTail string
-
-	LastNonEmptyStdoutLine string
-}
-
 type Service struct {
 	logger  *zap.Logger
 	tracer  trace.Tracer
@@ -95,6 +67,30 @@ func (s *Service) BuildPrompt(ctx context.Context, promptPath string, payload st
 	combined += payload
 
 	return combined, nil
+}
+
+// BuildPromptWithParams reads a prompt template and replaces placeholders with provided parameters
+func (s *Service) BuildPromptWithParams(ctx context.Context, promptPath string, params map[string]string) (string, error) {
+	traceCtx, span := s.tracer.Start(ctx, "BuildPromptWithParams")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, s.logger)
+
+	b, err := os.ReadFile(promptPath)
+	if err != nil {
+		logger.Error("failed to read prompt template", zap.String("path", promptPath), zap.Error(err))
+		span.RecordError(err)
+		return "", err
+	}
+
+	prompt := string(b)
+
+	// Replace all placeholders with provided parameters
+	for key, value := range params {
+		placeholder := "{{" + key + "}}"
+		prompt = strings.ReplaceAll(prompt, placeholder, value)
+	}
+
+	return prompt, nil
 }
 
 func (s *Service) ChatText(ctx context.Context, text string) (Response, error) {
@@ -406,7 +402,48 @@ func (s *Service) GetFileContent(ctx context.Context, filenames []string) (map[s
 	return files, nil
 }
 
-func (s *Service) ValidateScriptRun(ctx context.Context, path string) (RunScriptResult, EvaluateResult, error) {
+// classifyFailure classifies the failure type based on the output string 
+func classifyFailure(out string) FailureType {
+	s := out
+
+	// ---- compile/build (go run compilation) ----
+	if strings.Contains(s, "# command-line-arguments") ||
+		strings.Contains(s, "imported and not used") ||
+		strings.Contains(s, "undefined: ") ||
+		strings.Contains(s, "cannot use") ||
+		strings.Contains(s, "too many arguments") ||
+		strings.Contains(s, "not enough arguments") ||
+		strings.Contains(s, "syntax error") {
+		return FailureCompile
+	}
+
+	// ---- module/env issues ----
+	if strings.Contains(s, "go: downloading") && strings.Contains(s, "error") {
+		return FailureEnv
+	}
+	if strings.Contains(s, "go: ") && (strings.Contains(s, "missing go.sum entry") ||
+		strings.Contains(s, "no required module provides package") ||
+		strings.Contains(s, "cannot find module providing package") ||
+		strings.Contains(s, "module ") && strings.Contains(s, "not found") ||
+		strings.Contains(s, "GOPROXY") ||
+		strings.Contains(s, "i/o timeout") ||
+		strings.Contains(s, "TLS handshake timeout")) {
+		return FailureEnv
+	}
+
+	// ---- panic/runtime ----
+	if strings.Contains(s, "panic:") ||
+		strings.Contains(s, "fatal error:") {
+		return FailureRuntime
+	}
+
+	return FailureRuntime
+}
+
+
+// ValidateScriptRun check exit code/timeout first, then check output for expected error patterns or marker
+// expectedErrors: slice of error messages/patterns to look for in output (empty means use default marker)
+func (s *Service) ValidateScriptRun(ctx context.Context, path string, expectedErrors []string) (RunScriptResult, EvaluateResult, error) {
 	run, err := s.RunScript(ctx, path, RunScriptOptions{})
 	if err != nil {
 		return RunScriptResult{}, EvaluateResult{}, err
@@ -414,23 +451,94 @@ func (s *Service) ValidateScriptRun(ctx context.Context, path string) (RunScript
 
 	out := run.Stdout + "\n" + run.Stderr
 
-	// 1) compile/build failure 
-	if run.ExitCode != 0 && strings.Contains(out, "# command-line-arguments") {
+	// 0) timeout（這通常不是「rethink」，而是 tune：加 timeout / 降低輸出 / 調整負載）
+	if run.TimedOut {
 		return run, EvaluateResult{
 			Reproduced: false,
 			NeedRetry:  true,
-			Reason:     "compile/build failed",
+			Reason:     "script timed out",
+			Failure:    FailureTimeout,
+			Next:       ActionTune,
 		}, nil
 	}
 
-	// 2) MVP marker
-	reproduced := strings.Contains(out, "Error Reproduced Successfully")
-	ev := EvaluateResult{Reproduced: reproduced, NeedRetry: !reproduced}
-	if ev.NeedRetry {
-		ev.Reason = "expected marker not found in output"
+	// 1) non-zero exit code：compile/env/runtime
+	if run.ExitCode != 0 {
+		switch classifyFailure(out) {
+		case FailureCompile:
+			return run, EvaluateResult{
+				Reproduced: false,
+				NeedRetry:  true,
+				Reason:     "compile/build failed",
+				Failure:    FailureCompile,
+				Next:       ActionFixScript,
+			}, nil
+		case FailureEnv:
+			// e.g. go mod / module / sum / download
+			return run, EvaluateResult{
+				Reproduced: false,
+				NeedRetry:  true,
+				Reason:     "environment/module resolution failed",
+				Failure:    FailureEnv,
+				Next:       ActionFixScript,
+			}, nil
+		default:
+			// non 0 exit: mostly runtime panic or http client crash
+			return run, EvaluateResult{
+				Reproduced: false,
+				NeedRetry:  true,
+				Reason:     "runtime error (non-zero exit)",
+				Failure:    FailureRuntime,
+				Next:       ActionRethink,
+			}, nil
+		}
 	}
-	return run, ev, nil
+
+	// 2) exit 0：inspect error message or the marker
+	reproduced := false
+	matchedErrors := []string{}
+	
+	if len(expectedErrors) > 0 {
+		for _, expectedErr := range expectedErrors {
+			if strings.Contains(out, expectedErr) {
+				reproduced = true
+				matchedErrors = append(matchedErrors, expectedErr)
+			}
+		}
+		if reproduced {
+			reason := fmt.Sprintf("found expected error patterns: %s", strings.Join(matchedErrors, ", "))
+			return run, EvaluateResult{
+				Reproduced:     true,
+				NeedRetry:      false,
+				Reason:         reason,
+				Failure:        FailureNone,
+				Next:           ActionStop,
+				ExpectedErrors: expectedErrors,
+			}, nil
+		}
+	} else {
+		if strings.Contains(out, "Error Reproduced Successfully") {
+			return run, EvaluateResult{
+				Reproduced:     true,
+				NeedRetry:      false,
+				Reason:         "marker found",
+				Failure:        FailureNone,
+				Next:           ActionStop,
+				ExpectedErrors: []string{"Error Reproduced Successfully"},
+			}, nil
+		}
+	}
+
+	// 3) exit 0 但沒 marker：先 rerun/tune，再到 rethink（由上層 attempt 決定）
+	return run, EvaluateResult{
+		Reproduced: false,
+		NeedRetry:  true,
+		Reason:     "expected marker not found in output",
+		Failure:    FailureNoRepro,
+		Next:       ActionRerun,
+	}, nil
 }
+
 
 
 func (s *Service) RunScript(ctx context.Context, path string, opt RunScriptOptions) (RunScriptResult, error) {

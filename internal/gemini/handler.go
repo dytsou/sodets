@@ -31,13 +31,14 @@ type RegenerateResponse struct {
 
 type ChatOperator interface {
 	BuildPrompt(ctx context.Context, promptPath string, payload string) (string, error)
+	BuildPromptWithParams(ctx context.Context, promptPath string, params map[string]string) (string, error)
 	ChatText(ctx context.Context, text string) (Response, error)
 	Chat(ctx context.Context, req GeminiAPIRequest) (Response, error)
 	ExtractUniqueCallers(ctx context.Context) ([]string, error)
 	ExtractUniqueCallersFromContent(ctx context.Context, content string) ([]string, error)
 	GetFileContent(ctx context.Context, filenames []string) (map[string]string, error)
 	RunScript(ctx context.Context, path string, opt RunScriptOptions) (RunScriptResult, error)
-	ValidateScriptRun(ctx context.Context, path string) (RunScriptResult, EvaluateResult, error)
+	ValidateScriptRun(ctx context.Context, path string, expectedErrors []string) (RunScriptResult, EvaluateResult, error)
 }
 
 type Handler struct {
@@ -437,29 +438,160 @@ func (h *Handler) CallerHandler(w http.ResponseWriter, r *http.Request) {
 	handlerutil.WriteJSONResponse(w, http.StatusOK, contents)
 }
 
+func buildIterationPayload(ev EvaluateResult, run RunScriptResult, scriptCode string) string {
+	var b strings.Builder
+
+	b.WriteString("## Previous Evaluation\n")
+	b.WriteString(fmt.Sprintf("- Failure: %s\n- Next: %s\n- Reason: %s\n", ev.Failure, ev.Next, ev.Reason))
+
+	b.WriteString("\n## Last Run Summary\n")
+	b.WriteString(fmt.Sprintf("- ExitCode: %d\n- TimedOut: %v\n- Duration: %s\n", run.ExitCode, run.TimedOut, run.Duration))
+
+	if strings.TrimSpace(run.StdoutTail) != "" {
+		b.WriteString("\n## Stdout (tail)\n")
+		b.WriteString(run.StdoutTail)
+		b.WriteString("\n")
+	}
+
+	if strings.TrimSpace(run.StderrTail) != "" {
+		b.WriteString("\n## Stderr (tail)\n")
+		b.WriteString(run.StderrTail)
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n## Current Script\n```go\n")
+	b.WriteString(scriptCode)
+	b.WriteString("\n```\n")
+
+	return b.String()
+}
+
 func (h *Handler) RegenerateHandler(w http.ResponseWriter, r *http.Request) {
 	traceCtx, span := h.tracer.Start(r.Context(), "RegenerateHandler")
 	defer span.End()
 	logger := logutil.WithContext(traceCtx, h.logger)
 
-	var resp []RegenerateResponse
+	const maxAttempts = 3
+	resp := make([]RegenerateResponse, 0, maxAttempts)
 	path := "scripts/error_race_reproduction.go"
-	run, ev, err := h.operator.ValidateScriptRun(traceCtx, path)
-	if err != nil {
-		logger.Warn("failed to run script", zap.Error(err))
-	}
 
+	// First validation attempt (use empty expectedErrors to use default marker)
+	run, ev, err := h.operator.ValidateScriptRun(traceCtx, path, []string{"unable to find tenants with id '00000000-0000-0000-0000-000000000000'"})
+	if err != nil {
+		logger.Warn("Attempt 1: Validation failed", zap.Error(err))
+	}
 	resp = append(resp, RegenerateResponse{Attempt: 1, Run: run, Eval: ev})
 
-	if ev.NeedRetry {
-		run, ev, err = h.operator.ValidateScriptRun(traceCtx, path)
-		if err != nil {
-			logger.Warn("failed to run script again", zap.Error(err))
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+	// Retry loop - up to maxAttempts total
+	for attemptNum := 2; attemptNum <= maxAttempts && ev.NeedRetry; attemptNum++ {
+		logger.Info("Starting retry attempt",
+			zap.Int("attempt", attemptNum),
+			zap.Int("max_attempts", maxAttempts),
+			zap.String("next_action", string(ev.Next)),
+		)
+		
+		var retryScriptText Response
+		
+		switch ev.Next {
+		case ActionFixScript:
+			// Handle compilation/build errors
+			logger.Info("Using FIX_SCRIPT strategy", zap.Int("attempt", attemptNum))
+			currentScript, _ := os.ReadFile(path)
+			fixParams := FixScriptParams{
+				Stderr:        run.Stderr,
+				CurrentScript: string(currentScript),
+			}
+			fixPrompt, err := h.operator.BuildPromptWithParams(traceCtx, "internal/gemini/prompts/fix_script.txt", fixParams.ToMap())
+			if err != nil {
+				logger.Error("Failed to build fix_script prompt", zap.Error(err), zap.Int("attempt", attemptNum))
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			retryScriptText, err = h.operator.ChatText(traceCtx, fixPrompt)
+			if err != nil {
+				logger.Error("Failed to generate fixed script", zap.Error(err), zap.Int("attempt", attemptNum))
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			
+		case ActionRethink:
+			// Handle reproduction strategy issues
+			logger.Info("Using RETHINK strategy", zap.Int("attempt", attemptNum))
+			currentScript, _ := os.ReadFile(path)
+			// Build summary of previous attempts
+			prevAttempts := fmt.Sprintf("Previous attempts: %d", attemptNum-1)
+			for _, r := range resp {
+				prevAttempts += fmt.Sprintf("\n- Attempt %d: ExitCode=%d, Reproduced=%v, Reason=%s", 
+					r.Attempt, r.Run.ExitCode, r.Eval.Reproduced, r.Eval.Reason)
+			}
+			
+			rethinkParams := RethinkScriptParams{
+				ExpectedKeywords:     "tenant not found, nil UUID, 00000000-0000-0000-0000-000000000000",
+				ExpectedEndpoints:    "/api/orgs/:slug",
+				ExpectedErrorPattern: "unable to find tenants with id '00000000-0000-0000-0000-000000000000'",
+				RunSummary:           prevAttempts,
+				ObservationNotes:     ev.Reason,
+				CurrentScript:        string(currentScript),
+			}
+			rethinkPrompt, err := h.operator.BuildPromptWithParams(traceCtx, "internal/gemini/prompts/rethink_script.txt", rethinkParams.ToMap())
+			if err != nil {
+				logger.Error("Failed to build rethink_script prompt", zap.Error(err), zap.Int("attempt", attemptNum))
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			retryScriptText, err = h.operator.ChatText(traceCtx, rethinkPrompt)
+			if err != nil {
+				logger.Error("Failed to generate rethought script", zap.Error(err), zap.Int("attempt", attemptNum))
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			
+		default:
+			// Simple rerun or unknown action
+			logger.Info("Rerunning without modification", zap.Int("attempt", attemptNum))
+			run, ev, err = h.operator.ValidateScriptRun(traceCtx, path, []string{"unable to find tenants with id '00000000-0000-0000-0000-000000000000'"})
+			if err != nil {
+				logger.Warn("Validation attempt failed", zap.Error(err), zap.Int("attempt", attemptNum))
+			}
+			resp = append(resp, RegenerateResponse{Attempt: attemptNum, Run: run, Eval: ev})
+			continue
 		}
-		resp = append(resp, RegenerateResponse{Attempt: 2, Run: run, Eval: ev})
+		
+		// Write the regenerated script
+		if retryScriptText.Text != "" {
+			newFilePath, err := WriteCodeToFile(retryScriptText, "scripts/error_race_reproduction")
+			if err != nil {
+				logger.Error("Failed to write regenerated script", zap.Error(err), zap.Int("attempt", attemptNum))
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			logger.Info("Regenerated script written", 
+				zap.String("path", newFilePath),
+				zap.Int("attempt", attemptNum),
+			)
+			
+			// Update path to the new script
+			path = newFilePath
+			
+			// Validate the regenerated script
+			run, ev, err = h.operator.ValidateScriptRun(traceCtx, path, []string{"unable to find tenants with id '00000000-0000-0000-0000-000000000000'"})
+			if err != nil {
+				logger.Warn("Validation attempt failed", zap.Error(err), zap.Int("attempt", attemptNum))
+			}
+			resp = append(resp, RegenerateResponse{Attempt: attemptNum, Run: run, Eval: ev})
+			
+			// Log success if reproduced
+			if ev.Reproduced {
+				logger.Info("Successfully reproduced error!", zap.Int("attempt", attemptNum))
+				break
+			}
+		}
 	}
+
+	logger.Info("Regeneration process completed",
+		zap.Int("total_attempts", len(resp)),
+		zap.Bool("final_reproduced", ev.Reproduced),
+	)
 
 	handlerutil.WriteJSONResponse(w, http.StatusOK, resp)
 }
@@ -533,24 +665,110 @@ func (h *Handler) ErrorReproducerHandler(w http.ResponseWriter, r *http.Request)
 	logger.Info("Stage 4: Validating reproduction script")
 	var resp []RegenerateResponse
 	path := "scripts/auto_race_reproduction.go"
-	run, ev, err := h.operator.ValidateScriptRun(traceCtx, path)
+	
+	// Extract expected error messages from analysis result
+	expectedErrors := make([]string, 0)
+	if analysisResult.Triage.PrimaryErrorLog != "" {
+		expectedErrors = append(expectedErrors, analysisResult.Triage.PrimaryErrorLog)
+	}
+	// Also include detected keywords as potential error indicators
+	expectedErrors = append(expectedErrors, analysisResult.Triage.DetectedKeywords...)
+	
+	logger.Info("Expected error patterns for validation", 
+		zap.Strings("expected_errors", expectedErrors),
+	)
+	
+	run, ev, err := h.operator.ValidateScriptRun(traceCtx, path, expectedErrors)
 	if err != nil {
 		logger.Warn("Stage 4: First validation attempt failed", zap.Error(err))
 	}
 
 	resp = append(resp, RegenerateResponse{Attempt: 1, Run: run, Eval: ev})
 
-	// 7) Retry if needed
+	// 7) Retry if needed with appropriate strategy
 	if ev.NeedRetry {
-		logger.Info("Stage 4: Retrying script validation")
-		run, ev, err = h.operator.ValidateScriptRun(traceCtx, path)
-		if err != nil {
-			logger.Warn("Stage 4: Second validation attempt failed", zap.Error(err))
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+		logger.Info("Stage 4: Retrying script validation", zap.String("next_action", string(ev.Next)))
+		
+		var retryScriptText Response
+		
+		switch ev.Next {
+		case ActionFixScript:
+			// Handle compilation/build errors
+			logger.Info("Using FIX_SCRIPT strategy")
+			currentScript, _ := os.ReadFile(path)
+			fixParams := FixScriptParams{
+				Stderr:        run.Stderr,
+				CurrentScript: string(currentScript),
+			}
+			fixPrompt, err := h.operator.BuildPromptWithParams(traceCtx, "internal/gemini/prompts/fix_script.txt", fixParams.ToMap())
+			if err != nil {
+				logger.Error("Failed to build fix_script prompt", zap.Error(err))
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			retryScriptText, err = h.operator.ChatText(traceCtx, fixPrompt)
+			if err != nil {
+				logger.Error("Failed to generate fixed script", zap.Error(err))
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			
+		case ActionRethink:
+			// Handle reproduction strategy issues
+			logger.Info("Using RETHINK strategy")
+			currentScript, _ := os.ReadFile(path)
+			rethinkParams := RethinkScriptParams{
+				ExpectedKeywords:     strings.Join(analysisResult.Triage.DetectedKeywords, ", "),
+				ExpectedEndpoints:    "API endpoints from analysis", // TODO: extract from analysis
+				ExpectedErrorPattern: analysisResult.Triage.PrimaryErrorLog,
+				RunSummary:           fmt.Sprintf("ExitCode: %d, Reproduced: %v", run.ExitCode, ev.Reproduced),
+				ObservationNotes:     ev.Reason,
+				CurrentScript:        string(currentScript),
+			}
+			rethinkPrompt, err := h.operator.BuildPromptWithParams(traceCtx, "internal/gemini/prompts/rethink_script.txt", rethinkParams.ToMap())
+			if err != nil {
+				logger.Error("Failed to build rethink_script prompt", zap.Error(err))
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			retryScriptText, err = h.operator.ChatText(traceCtx, rethinkPrompt)
+			if err != nil {
+				logger.Error("Failed to generate rethought script", zap.Error(err))
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			
+		default:
+			// Simple rerun or unknown action
+			logger.Info("Rerunning without modification")
+			run, ev, err = h.operator.ValidateScriptRun(traceCtx, path, expectedErrors)
+			if err != nil {
+				logger.Warn("Stage 4: Second validation attempt failed", zap.Error(err))
+			}
+			resp = append(resp, RegenerateResponse{Attempt: 2, Run: run, Eval: ev})
+			goto skipRegeneration
 		}
-		resp = append(resp, RegenerateResponse{Attempt: 2, Run: run, Eval: ev})
+		
+		// Write the regenerated script
+		if retryScriptText.Text != "" {
+			newFilePath, err := WriteCodeToFile(retryScriptText, "scripts/auto_race_reproduction")
+			if err != nil {
+				logger.Error("Failed to write regenerated script", zap.Error(err))
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			logger.Info("Regenerated script written", zap.String("path", newFilePath))
+			
+			// Validate the regenerated script with expected errors
+			run, ev, err = h.operator.ValidateScriptRun(traceCtx, newFilePath, expectedErrors)
+			if err != nil {
+				logger.Warn("Stage 4: Second validation attempt failed", zap.Error(err))
+			}
+			resp = append(resp, RegenerateResponse{Attempt: 2, Run: run, Eval: ev})
+		}
 	}
+	
+skipRegeneration:
 
 	// Return comprehensive response
 	handlerutil.WriteJSONResponse(w, http.StatusOK, map[string]any{
