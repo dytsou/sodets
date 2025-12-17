@@ -1,8 +1,6 @@
 package config
 
 import (
-	googleOauth "NYCU-SDC/core-system-backend/internal/auth/oauthprovider"
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -18,30 +16,25 @@ import (
 
 const DefaultSecret = "default-secret"
 
-var ErrDatabaseURLRequired = errors.New("database_url is required")
-
 type Config struct {
 	// Dev mode disables strict cookie policies by using SameSite=None
 	// instead of SameSite=Strict, allowing cross-site requests during development.
-	Dev                       bool                    `yaml:"dev"                envconfig:"DEV"`
-	Debug                     bool                    `yaml:"debug"              envconfig:"DEBUG"`
-	Host                      string                  `yaml:"host"               envconfig:"HOST"`
-	Port                      string                  `yaml:"port"               envconfig:"PORT"`
-	BaseURL                   string                  `yaml:"base_url"          envconfig:"BASE_URL"`
-	OauthProxyBaseURL         string                  `yaml:"oauth_proxy_base_url" envconfig:"OAUTH_PROXY_BASE_URL"`
-	OauthProxySecret          string                  `yaml:"oauth_proxy_secret" envconfig:"OAUTH_PROXY_SECRET"`
-	Secret                    string                  `yaml:"secret"             envconfig:"SECRET"`
-	DatabaseURL               string                  `yaml:"database_url"       envconfig:"DATABASE_URL"`
-	MigrationSource           string                  `yaml:"migration_source"   envconfig:"MIGRATION_SOURCE"`
-	AccessTokenExpirationStr  string                  `yaml:"access_token_expiration" envconfig:"ACCESS_TOKEN_EXPIRATION"`
-	RefreshTokenExpirationStr string                  `yaml:"refresh_token_expiration" envconfig:"REFRESH_TOKEN_EXPIRATION"`
-	OtelCollectorUrl          string                  `yaml:"otel_collector_url" envconfig:"OTEL_COLLECTOR_URL"`
-	AllowOrigins              []string                `yaml:"allow_origins"      envconfig:"ALLOW_ORIGINS"`
-	GoogleOauth               googleOauth.GoogleOauth `yaml:"google_oauth"`
-	GeminiAPIKey              string                  `yaml:"gemini_api_key"      envconfig:"GEMINI_API_KEY"`
-	ErrLogPath                string                  `yaml:"err_log_path"   envconfig:"ERR_LOG_PATH"`
-	AccessTokenExpiration     time.Duration           `yaml:"-"`
-	RefreshTokenExpiration    time.Duration           `yaml:"-"`
+	Dev                       bool          `yaml:"dev"                envconfig:"DEV"`
+	Debug                     bool          `yaml:"debug"              envconfig:"DEBUG"`
+	Host                      string        `yaml:"host"               envconfig:"HOST"`
+	Port                      string        `yaml:"port"               envconfig:"PORT"`
+	BaseURL                   string        `yaml:"base_url"          envconfig:"BASE_URL"`
+	OauthProxyBaseURL         string        `yaml:"oauth_proxy_base_url" envconfig:"OAUTH_PROXY_BASE_URL"`
+	OauthProxySecret          string        `yaml:"oauth_proxy_secret" envconfig:"OAUTH_PROXY_SECRET"`
+	Secret                    string        `yaml:"secret"             envconfig:"SECRET"`
+	AccessTokenExpirationStr  string        `yaml:"access_token_expiration" envconfig:"ACCESS_TOKEN_EXPIRATION"`
+	RefreshTokenExpirationStr string        `yaml:"refresh_token_expiration" envconfig:"REFRESH_TOKEN_EXPIRATION"`
+	OtelCollectorUrl          string        `yaml:"otel_collector_url" envconfig:"OTEL_COLLECTOR_URL"`
+	AllowOrigins              []string      `yaml:"allow_origins"      envconfig:"ALLOW_ORIGINS"`
+	GeminiAPIKey              string        `yaml:"gemini_api_key"      envconfig:"GEMINI_API_KEY"`
+	ErrLogPath                string        `yaml:"err_log_path"   envconfig:"ERR_LOG_PATH"`
+	AccessTokenExpiration     time.Duration `yaml:"-"`
+	RefreshTokenExpiration    time.Duration `yaml:"-"`
 }
 
 type LogBuffer struct {
@@ -77,10 +70,6 @@ func (cl *LogBuffer) FlushToZap(logger *zap.Logger) {
 }
 
 func (c *Config) Validate() error {
-	if c.DatabaseURL == "" {
-		return ErrDatabaseURLRequired
-	}
-
 	var err error
 
 	// Parse access_token_expiration string into time.Duration
@@ -129,12 +118,9 @@ func Load() (Config, *LogBuffer) {
 		Host:                      "localhost",
 		Port:                      "8080",
 		Secret:                    DefaultSecret,
-		DatabaseURL:               "",
-		MigrationSource:           "file://internal/database/migrations",
 		AccessTokenExpirationStr:  "15m",
 		RefreshTokenExpirationStr: "720h",
 		OtelCollectorUrl:          "",
-		GoogleOauth:               googleOauth.GoogleOauth{},
 		GeminiAPIKey:              "",
 		ErrLogPath:                "",
 	}
@@ -203,14 +189,8 @@ func FromEnv(config *Config, logger *LogBuffer) (*Config, error) {
 		OauthProxyBaseURL: os.Getenv("OAUTH_PROXY_BASE_URL"),
 		OauthProxySecret:  os.Getenv("OAUTH_PROXY_SECRET"),
 		Secret:            os.Getenv("SECRET"),
-		DatabaseURL:       os.Getenv("DATABASE_URL"),
-		MigrationSource:   os.Getenv("MIGRATION_SOURCE"),
 		OtelCollectorUrl:  os.Getenv("OTEL_COLLECTOR_URL"),
 		GeminiAPIKey:      os.Getenv("GEMINI_API_KEY"),
-		GoogleOauth: googleOauth.GoogleOauth{
-			ClientID:     os.Getenv("GOOGLE_OAUTH_CLIENT_ID"),
-			ClientSecret: os.Getenv("GOOGLE_OAUTH_CLIENT_SECRET"),
-		},
 	}
 
 	return configutil.Merge[Config](config, envConfig)
@@ -225,12 +205,8 @@ func FromFlags(config *Config) (*Config, error) {
 	flag.StringVar(&flagConfig.Port, "port", "", "port")
 	flag.StringVar(&flagConfig.BaseURL, "base_url", "", "base url")
 	flag.StringVar(&flagConfig.Secret, "secret", "", "secret")
-	flag.StringVar(&flagConfig.DatabaseURL, "database_url", "", "database url")
-	flag.StringVar(&flagConfig.MigrationSource, "migration_source", "", "migration source")
 	flag.StringVar(&flagConfig.OtelCollectorUrl, "otel_collector_url", "", "OpenTelemetry collector URL")
 	flag.StringVar(&flagConfig.GeminiAPIKey, "gemini_api_key", "", "Gemini API key")
-	flag.StringVar(&flagConfig.GoogleOauth.ClientID, "google_oauth_client_id", "", "Google OAuth client ID")
-	flag.StringVar(&flagConfig.GoogleOauth.ClientSecret, "google_oauth_client_secret", "", "Google OAuth client secret")
 
 	flag.Parse()
 

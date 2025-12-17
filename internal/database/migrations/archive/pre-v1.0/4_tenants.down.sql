@@ -1,3 +1,0 @@
-DROP TABLE IF EXISTS tenants;
-DROP TYPE IF EXISTS db_strategy;
-DROP TABLE IF EXISTS slug_history;

@@ -1,4 +1,0 @@
-DROP TABLE IF EXISTS unit_members;
-DROP TABLE IF EXISTS parent_child;
-DROP TABLE IF EXISTS units;
-DROP TYPE IF EXISTS unit_type;
