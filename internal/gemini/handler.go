@@ -71,7 +71,7 @@ type LogAnalysisResult struct {
 
 // performLogAnalysis executes two-stage log analysis with triage and expert phases
 // This method is shared between AnalyzeLogHandler and ErrorReproducerHandler
-func (h *Handler) performLogAnalysis(ctx context.Context, logger *zap.Logger, logContent string, triagePromptText string, expertPrompts map[string][]string) (*LogAnalysisResult, error) {
+func (h *Handler) performLogAnalysis(ctx context.Context, logger *zap.Logger, logContent string, triagePromptText string, expertPrompts map[string]string) (*LogAnalysisResult, error) {
 	// Extract callers from log content and fetch source code files for enhanced context
 	logger.Info("Extracting callers from log content")
 	callers, err := h.operator.ExtractUniqueCallersFromContent(ctx, logContent)
@@ -443,7 +443,7 @@ func (h *Handler) RegenerateHandler(w http.ResponseWriter, r *http.Request) {
 	logger := logutil.WithContext(traceCtx, h.logger)
 
 	var resp []RegenerateResponse
-	path := "scripts/auto_race_reproduction.go"
+	path := "scripts/error_race_reproduction.go"
 	run, ev, err := h.operator.ValidateScriptRun(traceCtx, path)
 	if err != nil {
 		logger.Warn("failed to run script", zap.Error(err))
@@ -470,7 +470,7 @@ func (h *Handler) ErrorReproducerHandler(w http.ResponseWriter, r *http.Request)
 	logger := logutil.WithContext(traceCtx, h.logger)
 
 	// 1) Read log file content
-	logFilePath := "incident_0001_59e41abb.json" // Example: you can get this from request body
+	logFilePath := "errorlogs/incident_0001_59e41abb.json" // Example: you can get this from request body
 	logContent, err := os.ReadFile(logFilePath)
 	if err != nil {
 		h.problemWriter.WriteError(traceCtx, w, fmt.Errorf("failed to read log file: %w", err), logger)
@@ -478,13 +478,13 @@ func (h *Handler) ErrorReproducerHandler(w http.ResponseWriter, r *http.Request)
 	}
 
 	// 2) Load expert prompts from file
-	expertPromptsData, err := os.ReadFile("internal/gemini/prompts/generate_error_report_experts.txt")
+	expertPromptsData, err := os.ReadFile("internal/gemini/prompts/generate_error_report_expert.txt")
 	if err != nil {
 		h.problemWriter.WriteError(traceCtx, w, fmt.Errorf("failed to read expert prompts: %w", err), logger)
 		return
 	}
 
-	var expertPrompts map[string][]string
+	var expertPrompts map[string]string
 	if err := json.Unmarshal(expertPromptsData, &expertPrompts); err != nil {
 		h.problemWriter.WriteError(traceCtx, w, fmt.Errorf("failed to parse expert prompts: %w", err), logger)
 		return

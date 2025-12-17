@@ -409,32 +409,29 @@ func (s *Service) GetFileContent(ctx context.Context, filenames []string) (map[s
 func (s *Service) ValidateScriptRun(ctx context.Context, path string) (RunScriptResult, EvaluateResult, error) {
 	run, err := s.RunScript(ctx, path, RunScriptOptions{})
 	if err != nil {
-		return RunScriptResult{}, EvaluateResult{}, err // 只有 IO/系統錯才回 error
+		return RunScriptResult{}, EvaluateResult{}, err
 	}
 
-	// MVP：Compare with the keyword
 	out := run.Stdout + "\n" + run.Stderr
+
+	// 1) compile/build failure 
+	if run.ExitCode != 0 && strings.Contains(out, "# command-line-arguments") {
+		return run, EvaluateResult{
+			Reproduced: false,
+			NeedRetry:  true,
+			Reason:     "compile/build failed",
+		}, nil
+	}
+
+	// 2) MVP marker
 	reproduced := strings.Contains(out, "Error Reproduced Successfully")
-
-	// Fallback: Having specific signature
-	if !reproduced {
-		if strings.Contains(out, "Failed to get tenant by id") ||
-			strings.Contains(out, "NotFoundError") ||
-			strings.Contains(out, "00000000-0000-0000-0000-000000000000") {
-			reproduced = true
-		}
-	}
-
-	// if not reproduced then retry
-	ev := EvaluateResult{
-		Reproduced: reproduced,
-		NeedRetry:  !reproduced,
-	}
+	ev := EvaluateResult{Reproduced: reproduced, NeedRetry: !reproduced}
 	if ev.NeedRetry {
 		ev.Reason = "expected marker not found in output"
 	}
 	return run, ev, nil
 }
+
 
 func (s *Service) RunScript(ctx context.Context, path string, opt RunScriptOptions) (RunScriptResult, error) {
 	traceCtx, span := s.tracer.Start(ctx, "RunScript")

@@ -35,4 +35,13 @@ I will provide a JSON object with the following structure:
    - Add comments inside the code explaining *why* this script reproduces the error based on the input JSON.
    - At the top of the script, include a comment block showing the expected `.env` content (e.g., `// Make sure .env contains: TARGET_UID=your-uuid-here`).
 
+5. Self-Diagnosis Manifest (MANDATORY)
+   Inside the Go code (as a top comment block), include a MANIFEST in JSON-like text:
+   MANIFEST:
+   - hypothesis: what exact condition will trigger the target error
+   - success_marker: the exact output string used for evaluation
+   - observability: what the script prints for each request (status, key headers, error snippets)
+   - failure_buckets: how to interpret outcomes (auth failure / endpoint wrong / no repro / wrong error)
+   - knobs: which parameters to tune (workers, duration, endpoint mix, slug strategy)
+
 # Input JSON is as following
