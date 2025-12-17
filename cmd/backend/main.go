@@ -267,6 +267,7 @@ func main() {
 	// Gemini API routes
 	mux.Handle("POST /api/gemini/chat", basicMiddleware.HandlerFunc(geminiHandler.ChatHandler))
 	mux.Handle("POST /api/gemini/analyze", basicMiddleware.HandlerFunc(geminiHandler.AnalyzeLogHandler))
+	mux.Handle("GET /api/gemini/regenerate", basicMiddleware.HandlerFunc(geminiHandler.RegenerateHandler))
 
 	// handle interrupt signal
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

@@ -1,14 +1,13 @@
 package gemini
 
 import (
+	"NYCU-SDC/core-system-backend/internal"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
-
-	"NYCU-SDC/core-system-backend/internal"
 
 	handlerutil "github.com/NYCU-SDC/summer/pkg/handler"
 	logutil "github.com/NYCU-SDC/summer/pkg/log"
@@ -23,8 +22,16 @@ const (
 	maxUploadSizeBytes = 1 << 20 // 1MB cap for uploaded text files
 )
 
+type RegenerateResponse struct {
+	Eval    EvaluateResult  `json:"eval"`
+	Attempt int             `json:"attempt"`
+	Run     RunScriptResult `json:"run"`
+}
+
 type ChatOperator interface {
 	Chat(ctx context.Context, req GeminiAPIRequest) (Response, error)
+	RunScript(ctx context.Context, path string, opt RunScriptOptions) (RunScriptResult, error)
+	ValidateScriptRun(ctx context.Context, path string) (RunScriptResult, EvaluateResult, error)
 }
 
 type Handler struct {
@@ -333,4 +340,31 @@ func (h *Handler) AnalyzeLogHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	handlerutil.WriteJSONResponse(w, http.StatusOK, result)
+}
+
+func (h *Handler) RegenerateHandler(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "RegenerateHandler")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+
+	var resp []RegenerateResponse
+	path := "scripts/auto_race_reproduction.go"
+	run, ev, err := h.operator.ValidateScriptRun(traceCtx, path)
+	if err != nil {
+		logger.Warn("failed to run script", zap.Error(err))
+	}
+
+	resp = append(resp, RegenerateResponse{Attempt: 1, Run: run, Eval: ev})
+
+	if ev.NeedRetry {
+		run, ev, err = h.operator.ValidateScriptRun(traceCtx, path)
+		if err != nil {
+			logger.Warn("failed to run script again", zap.Error(err))
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		resp = append(resp, RegenerateResponse{Attempt: 2, Run: run, Eval: ev})
+	}
+
+	handlerutil.WriteJSONResponse(w, http.StatusOK, resp)
 }
