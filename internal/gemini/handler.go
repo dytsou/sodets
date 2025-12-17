@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	handlerutil "github.com/NYCU-SDC/summer/pkg/handler"
@@ -30,6 +31,9 @@ type RegenerateResponse struct {
 
 type ChatOperator interface {
 	Chat(ctx context.Context, req GeminiAPIRequest) (Response, error)
+	ExtractUniqueCallers(ctx context.Context) ([]string, error)
+	ExtractUniqueCallersFromContent(ctx context.Context, content string) ([]string, error)
+	GetFileContent(ctx context.Context, filenames []string) (map[string]string, error)
 	RunScript(ctx context.Context, path string, opt RunScriptOptions) (RunScriptResult, error)
 	ValidateScriptRun(ctx context.Context, path string) (RunScriptResult, EvaluateResult, error)
 }
@@ -270,8 +274,38 @@ func (h *Handler) AnalyzeLogHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Extract callers from log content and fetch source code files for enhanced context
+	logger.Info("Extracting callers from log content")
+	callers, err := h.operator.ExtractUniqueCallersFromContent(traceCtx, request.FileContent)
+	if err != nil {
+		// Non-blocking: log warning but continue without source code context
+		logger.Warn("Failed to extract callers from log content, continuing without source code context", zap.Error(err))
+		callers = []string{}
+	}
+
+	var sourceCodeContext string
+	if len(callers) > 0 {
+		logger.Info("Fetching source code files from GitHub", zap.Int("file_count", len(callers)), zap.Strings("files", callers))
+		fileContents, err := h.operator.GetFileContent(traceCtx, callers)
+		if err != nil {
+			// Non-blocking: log warning but continue without source code context
+			logger.Warn("Failed to fetch source code files, continuing without source code context", zap.Error(err))
+		} else if len(fileContents) > 0 {
+			// Format source code context
+			var contextBuilder strings.Builder
+			contextBuilder.WriteString("\n\n## Relevant Source Code Files\n\n")
+			contextBuilder.WriteString("The following source code files were referenced in the logs and may be relevant for analysis:\n\n")
+			for filename, content := range fileContents {
+				contextBuilder.WriteString(fmt.Sprintf("### File: %s\n\n```\n%s\n```\n\n", filename, content))
+			}
+			sourceCodeContext = contextBuilder.String()
+			logger.Info("Successfully fetched source code context", zap.Int("files_fetched", len(fileContents)))
+		}
+	}
+
+	// Stage 1: Triage Classification
 	logger.Info("Stage 1: Starting triage classification")
-	triagePrompt := request.TriagePrompt + "\n\n" + request.FileContent
+	triagePrompt := request.TriagePrompt + "\n\n" + request.FileContent + "\n\n" + sourceCodeContext
 	triageReq := GeminiAPIRequest{
 		Contents: []Content{
 			{
@@ -311,7 +345,7 @@ func (h *Handler) AnalyzeLogHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	expertPromptWithContent := expertPrompt + "\n\n" + request.FileContent
+	expertPromptWithContent := expertPrompt + "\n\n" + request.FileContent + "\n\n" + sourceCodeContext
 	expertReq := GeminiAPIRequest{
 		Contents: []Content{
 			{
@@ -329,6 +363,14 @@ func (h *Handler) AnalyzeLogHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Parse expert response into structured format
+	structuredAnalysis, parseErr := ParseExpertResponse(expertResponse.Text)
+	if parseErr != nil {
+		// Non-blocking: if parsing fails, return original text
+		logger.Warn("Failed to parse expert response into structured format, returning original text", zap.Error(parseErr))
+		structuredAnalysis = nil
+	}
+
 	// Return combined response
 	result := map[string]interface{}{
 		"triage": map[string]interface{}{
@@ -336,10 +378,51 @@ func (h *Handler) AnalyzeLogHandler(w http.ResponseWriter, r *http.Request) {
 			"detected_keywords": triageResult.DetectedKeywords,
 			"primary_error_log": triageResult.PrimaryErrorLog,
 		},
-		"expert_analysis": expertResponse.Text,
+	}
+
+	// Include both structured and raw text for backward compatibility
+	if structuredAnalysis != nil {
+		result["expert_analysis"] = structuredAnalysis
+	} else {
+		// Fallback to original text format
+		result["expert_analysis"] = expertResponse.Text
+	}
+	// Always include raw text for reference
+	result["expert_analysis_raw"] = expertResponse.Text
+
+	// Write response JSON to analysis.json file
+	resultJSON, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		logger.Warn("Failed to marshal result to JSON for file writing", zap.Error(err))
+	} else {
+		if err := os.WriteFile("analysis.json", resultJSON, 0644); err != nil {
+			logger.Warn("Failed to write analysis.json file", zap.Error(err))
+		} else {
+			logger.Info("Response JSON written to analysis.json")
+		}
 	}
 
 	handlerutil.WriteJSONResponse(w, http.StatusOK, result)
+}
+
+func (h *Handler) CallerHandler(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "CallerHandler")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+
+	callers, err := h.operator.ExtractUniqueCallers(traceCtx)
+	if err != nil {
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
+		return
+	}
+
+	contents, err := h.operator.GetFileContent(traceCtx, callers)
+	if err != nil {
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
+		return
+	}
+
+	handlerutil.WriteJSONResponse(w, http.StatusOK, contents)
 }
 
 func (h *Handler) RegenerateHandler(w http.ResponseWriter, r *http.Request) {

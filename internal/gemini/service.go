@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -21,6 +22,8 @@ import (
 
 const (
 	geminiAPIBaseURL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+	repoAPI          = "https://api.github.com/repos/NYCU-SDC/core-system-backend/contents/internal"
+	summerAPI        = "https://api.github.com/repos/NYCU-SDC/summer/contents/pkg"
 )
 
 type EvaluateResult struct {
@@ -53,18 +56,20 @@ type RunScriptResult struct {
 }
 
 type Service struct {
-	logger *zap.Logger
-	tracer trace.Tracer
-	apiKey string
-	client *http.Client
+	logger  *zap.Logger
+	tracer  trace.Tracer
+	apiKey  string
+	logPath string
+	client  *http.Client
 }
 
-func NewService(logger *zap.Logger, apiKey string) *Service {
+func NewService(logger *zap.Logger, apiKey string, logPath string) *Service {
 	return &Service{
-		logger: logger,
-		tracer: otel.Tracer("gemini/service"),
-		apiKey: apiKey,
-		client: &http.Client{},
+		logger:  logger,
+		tracer:  otel.Tracer("gemini/service"),
+		apiKey:  apiKey,
+		logPath: logPath,
+		client:  &http.Client{},
 	}
 }
 
@@ -154,6 +159,247 @@ func (s *Service) Chat(ctx context.Context, req GeminiAPIRequest) (Response, err
 	logger.Info("successfully received response from Gemini API", zap.String("text_length", fmt.Sprintf("%d", len(response.Text))))
 
 	return response, nil
+}
+
+func (s *Service) ExtractUniqueCallers(ctx context.Context) ([]string, error) {
+	_, span := s.tracer.Start(ctx, "ExtractUniqueCallers")
+	defer span.End()
+	logger := logutil.WithContext(ctx, s.logger)
+
+	content, err := os.ReadFile(s.logPath)
+	if err != nil {
+		logger.Error("failed to read log file", zap.Error(err))
+		span.RecordError(err)
+		return nil, err
+	}
+
+	var incident Incident
+	if err := json.Unmarshal(content, &incident); err != nil {
+		logger.Error("failed to unmarshal log file", zap.Error(err))
+		span.RecordError(err)
+		return nil, err
+	}
+
+	callersSet := make(map[string]struct{})
+
+	for _, entry := range incident.Timeline {
+		var msg LogMessage
+
+		// Handle different timeline formats
+		switch v := entry.(type) {
+		case string:
+			// New format: entry is a JSON string directly (e.g., incident_0001_59e41abb-full.json)
+			err := json.Unmarshal([]byte(v), &msg)
+			if err != nil {
+				continue
+			}
+		case map[string]interface{}:
+			// Old format: entry is an object with details.message
+			details, ok := v["details"].(map[string]interface{})
+			if !ok {
+				continue
+			}
+			message, ok := details["message"].(string)
+			if !ok || message == "" {
+				continue
+			}
+			err := json.Unmarshal([]byte(message), &msg)
+			if err != nil {
+				continue
+			}
+		default:
+			// Try to unmarshal as old format TimelineEntry
+			entryBytes, err := json.Marshal(entry)
+			if err != nil {
+				continue
+			}
+			var timelineEntry TimelineEntry
+			if err := json.Unmarshal(entryBytes, &timelineEntry); err != nil {
+				continue
+			}
+			if timelineEntry.Details == nil || timelineEntry.Details.Message == "" {
+				continue
+			}
+			err = json.Unmarshal([]byte(timelineEntry.Details.Message), &msg)
+			if err != nil {
+				continue
+			}
+		}
+
+		// Extract filename from caller
+		if msg.Caller == "" {
+			continue
+		}
+
+		parts := strings.Split(msg.Caller, ":")
+		filename := parts[0]
+		callersSet[filename] = struct{}{}
+	}
+
+	callers := make([]string, 0, len(callersSet))
+	for c := range callersSet {
+		callers = append(callers, c)
+	}
+	sort.Strings(callers)
+
+	return callers, nil
+}
+
+// ExtractUniqueCallersFromContent extracts unique caller filenames from log content string
+// This is similar to ExtractUniqueCallers but works with content instead of reading from file
+func (s *Service) ExtractUniqueCallersFromContent(ctx context.Context, content string) ([]string, error) {
+	_, span := s.tracer.Start(ctx, "ExtractUniqueCallersFromContent")
+	defer span.End()
+	logger := logutil.WithContext(ctx, s.logger)
+
+	var incident Incident
+	if err := json.Unmarshal([]byte(content), &incident); err != nil {
+		logger.Error("failed to unmarshal log content", zap.Error(err))
+		span.RecordError(err)
+		return nil, err
+	}
+
+	callersSet := make(map[string]struct{})
+
+	for _, entry := range incident.Timeline {
+		var msg LogMessage
+
+		// Handle different timeline formats
+		switch v := entry.(type) {
+		case string:
+			err := json.Unmarshal([]byte(v), &msg)
+			if err != nil {
+				continue
+			}
+		case map[string]interface{}:
+			// Old format: entry is an object with details.message
+			details, ok := v["details"].(map[string]interface{})
+			if !ok {
+				continue
+			}
+			message, ok := details["message"].(string)
+			if !ok || message == "" {
+				continue
+			}
+			err := json.Unmarshal([]byte(message), &msg)
+			if err != nil {
+				continue
+			}
+		default:
+			// Try to unmarshal as old format TimelineEntry
+			entryBytes, err := json.Marshal(entry)
+			if err != nil {
+				continue
+			}
+			var timelineEntry TimelineEntry
+			if err := json.Unmarshal(entryBytes, &timelineEntry); err != nil {
+				continue
+			}
+			if timelineEntry.Details == nil || timelineEntry.Details.Message == "" {
+				continue
+			}
+			err = json.Unmarshal([]byte(timelineEntry.Details.Message), &msg)
+			if err != nil {
+				continue
+			}
+		}
+
+		// Extract filename from caller
+		if msg.Caller == "" {
+			continue
+		}
+
+		parts := strings.Split(msg.Caller, ":")
+		filename := parts[0]
+		callersSet[filename] = struct{}{}
+	}
+
+	callers := make([]string, 0, len(callersSet))
+	for c := range callersSet {
+		callers = append(callers, c)
+	}
+	sort.Strings(callers)
+
+	return callers, nil
+}
+
+func (s *Service) fetchGithubFile(ctx context.Context, baseAPI, filename string) (string, int, error) {
+	logger := logutil.WithContext(ctx, s.logger)
+
+	fileURL := fmt.Sprintf("%s/%s",
+		strings.TrimRight(baseAPI, "/"),
+		strings.TrimLeft(filename, "/"),
+	)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
+	if err != nil {
+		logger.Error("failed to create HTTP request", zap.Error(err))
+		return "", 0, fmt.Errorf("failed to create HTTP request: %w", err)
+	}
+
+	req.Header.Set("Accept", "application/vnd.github.raw+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		logger.Error("failed to send request to GitHub API", zap.Error(err))
+		return "", 0, fmt.Errorf("failed to send request to GitHub API: %w", err)
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			logger.Warn("failed to close response body", zap.Error(closeErr))
+		}
+	}()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		logger.Error("failed to read GitHub response body", zap.Error(err))
+		return "", resp.StatusCode, fmt.Errorf("failed to read GitHub response body: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", resp.StatusCode,
+			fmt.Errorf("github API status=%d body=%s", resp.StatusCode, string(body))
+	}
+
+	return string(body), http.StatusOK, nil
+}
+
+func (s *Service) GetFileContent(ctx context.Context, filenames []string) (map[string]string, error) {
+	_, span := s.tracer.Start(ctx, "GetFileContent")
+	defer span.End()
+	logger := logutil.WithContext(ctx, s.logger)
+
+	files := make(map[string]string, len(filenames))
+	repoBases := []string{repoAPI, summerAPI}
+	for _, filename := range filenames {
+		var content string
+		found := false
+
+		for _, base := range repoBases {
+			body, status, err := s.fetchGithubFile(ctx, base, filename)
+			if err != nil {
+				if status != http.StatusNotFound {
+					span.RecordError(err)
+					return nil, err
+				}
+				logger.Warn("file not found in repo", zap.String("repo", base), zap.String("filename", filename), zap.Error(err))
+				continue
+			}
+
+			content = body
+			found = true
+			break
+		}
+
+		if !found {
+			logger.Warn("file not found in any repo", zap.String("filename", filename))
+			continue
+		}
+
+		files[filename] = content
+	}
+	return files, nil
 }
 
 func (s *Service) ValidateScriptRun(ctx context.Context, path string) (RunScriptResult, EvaluateResult, error) {

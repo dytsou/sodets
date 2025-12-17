@@ -39,9 +39,9 @@ type Config struct {
 	AllowOrigins              []string                `yaml:"allow_origins"      envconfig:"ALLOW_ORIGINS"`
 	GoogleOauth               googleOauth.GoogleOauth `yaml:"google_oauth"`
 	GeminiAPIKey              string                  `yaml:"gemini_api_key"      envconfig:"GEMINI_API_KEY"`
-
-	AccessTokenExpiration  time.Duration `yaml:"-"`
-	RefreshTokenExpiration time.Duration `yaml:"-"`
+	ErrLogPath                string                  `yaml:"err_log_path"   envconfig:"ERR_LOG_PATH"`
+	AccessTokenExpiration     time.Duration           `yaml:"-"`
+	RefreshTokenExpiration    time.Duration           `yaml:"-"`
 }
 
 type LogBuffer struct {
@@ -136,6 +136,7 @@ func Load() (Config, *LogBuffer) {
 		OtelCollectorUrl:          "",
 		GoogleOauth:               googleOauth.GoogleOauth{},
 		GeminiAPIKey:              "",
+		ErrLogPath:                "",
 	}
 
 	var err error
