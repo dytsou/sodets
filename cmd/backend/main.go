@@ -269,6 +269,7 @@ func main() {
 	mux.Handle("POST /api/gemini/analyze", basicMiddleware.HandlerFunc(geminiHandler.AnalyzeLogHandler))
 	mux.Handle("GET /api/gemini/caller", basicMiddleware.HandlerFunc(geminiHandler.CallerHandler))
 	mux.Handle("GET /api/gemini/regenerate", basicMiddleware.HandlerFunc(geminiHandler.RegenerateHandler))
+	mux.Handle("GET /api/gemini/error-reproducer", basicMiddleware.HandlerFunc(geminiHandler.ErrorReproducerHandler))
 
 	// handle interrupt signal
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

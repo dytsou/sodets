@@ -58,6 +58,130 @@ func NewHandler(logger *zap.Logger, validator *validator.Validate, problemWriter
 	}
 }
 
+// LogAnalysisResult contains the results of two-stage log analysis
+type LogAnalysisResult struct {
+	Triage struct {
+		AnalysisMode     AnalysisMode `json:"analysis_mode"`
+		DetectedKeywords []string     `json:"detected_keywords"`
+		PrimaryErrorLog  string       `json:"primary_error_log"`
+	} `json:"triage"`
+	ExpertAnalysis    interface{} `json:"expert_analysis"`
+	ExpertAnalysisRaw string      `json:"expert_analysis_raw"`
+}
+
+// performLogAnalysis executes two-stage log analysis with triage and expert phases
+// This method is shared between AnalyzeLogHandler and ErrorReproducerHandler
+func (h *Handler) performLogAnalysis(ctx context.Context, logger *zap.Logger, logContent string, triagePromptText string, expertPrompts map[string][]string) (*LogAnalysisResult, error) {
+	// Extract callers from log content and fetch source code files for enhanced context
+	logger.Info("Extracting callers from log content")
+	callers, err := h.operator.ExtractUniqueCallersFromContent(ctx, logContent)
+	if err != nil {
+		// Non-blocking: log warning but continue without source code context
+		logger.Warn("Failed to extract callers from log content, continuing without source code context", zap.Error(err))
+		callers = []string{}
+	}
+
+	var sourceCodeContext string
+	if len(callers) > 0 {
+		logger.Info("Fetching source code files from GitHub", zap.Int("file_count", len(callers)), zap.Strings("files", callers))
+		fileContents, err := h.operator.GetFileContent(ctx, callers)
+		if err != nil {
+			// Non-blocking: log warning but continue without source code context
+			logger.Warn("Failed to fetch source code files, continuing without source code context", zap.Error(err))
+		} else if len(fileContents) > 0 {
+			// Format source code context
+			var contextBuilder strings.Builder
+			contextBuilder.WriteString("\n\n## Relevant Source Code Files\n\n")
+			contextBuilder.WriteString("The following source code files were referenced in the logs and may be relevant for analysis:\n\n")
+			for filename, content := range fileContents {
+				contextBuilder.WriteString(fmt.Sprintf("### File: %s\n\n```\n%s\n```\n\n", filename, content))
+			}
+			sourceCodeContext = contextBuilder.String()
+			logger.Info("Successfully fetched source code context", zap.Int("files_fetched", len(fileContents)))
+		}
+	}
+
+	// Stage 1: Triage Classification
+	logger.Info("Stage 1: Starting triage classification")
+	triagePrompt := triagePromptText + "\n\n" + logContent + "\n\n" + sourceCodeContext
+	triageReq := GeminiAPIRequest{
+		Contents: []Content{
+			{
+				Parts: []Part{
+					{Text: triagePrompt},
+				},
+			},
+		},
+	}
+
+	triageResponse, err := h.operator.Chat(ctx, triageReq)
+	if err != nil {
+		logger.Error("Stage 1 failed", zap.Error(err))
+		return nil, fmt.Errorf("triage stage failed: %w", err)
+	}
+
+	// Parse triage response
+	triageResult, err := ParseTriageResponse(triageResponse.Text)
+	if err != nil {
+		logger.Error("Failed to parse triage response", zap.Error(err), zap.String("response", triageResponse.Text))
+		return nil, fmt.Errorf("failed to parse triage response: %w", err)
+	}
+
+	logger.Info("Stage 1 completed",
+		zap.String("analysis_mode", string(triageResult.AnalysisMode)),
+		zap.Strings("detected_keywords", triageResult.DetectedKeywords),
+	)
+
+	// Stage 2: Expert Analysis
+	logger.Info("Stage 2: Starting expert analysis", zap.String("mode", string(triageResult.AnalysisMode)))
+	expertPrompt, err := GetExpertPrompt(expertPrompts, triageResult.AnalysisMode)
+	if err != nil {
+		logger.Error("Failed to get expert prompt", zap.Error(err), zap.String("mode", string(triageResult.AnalysisMode)))
+		return nil, fmt.Errorf("failed to get expert prompt: %w", err)
+	}
+
+	expertPromptWithContent := expertPrompt + "\n\n" + logContent + "\n\n" + sourceCodeContext
+	expertReq := GeminiAPIRequest{
+		Contents: []Content{
+			{
+				Parts: []Part{
+					{Text: expertPromptWithContent},
+				},
+			},
+		},
+	}
+
+	expertResponse, err := h.operator.Chat(ctx, expertReq)
+	if err != nil {
+		logger.Error("Stage 2 failed", zap.Error(err))
+		return nil, fmt.Errorf("expert analysis stage failed: %w", err)
+	}
+
+	// Parse expert response into structured format
+	structuredAnalysis, parseErr := ParseExpertResponse(expertResponse.Text)
+	if parseErr != nil {
+		// Non-blocking: if parsing fails, return original text
+		logger.Warn("Failed to parse expert response into structured format, returning original text", zap.Error(parseErr))
+		structuredAnalysis = nil
+	}
+
+	// Build result
+	result := &LogAnalysisResult{
+		ExpertAnalysisRaw: expertResponse.Text,
+	}
+	result.Triage.AnalysisMode = triageResult.AnalysisMode
+	result.Triage.DetectedKeywords = triageResult.DetectedKeywords
+	result.Triage.PrimaryErrorLog = triageResult.PrimaryErrorLog
+
+	if structuredAnalysis != nil {
+		result.ExpertAnalysis = structuredAnalysis
+	} else {
+		result.ExpertAnalysis = expertResponse.Text
+	}
+
+	return result, nil
+}
+
 // ChatHandler handles POST requests to the Gemini API endpoint
 func (h *Handler) ChatHandler(w http.ResponseWriter, r *http.Request) {
 	traceCtx, span := h.tracer.Start(r.Context(), "ChatHandler")
@@ -178,7 +302,7 @@ func (h *Handler) AnalyzeLogHandler(w http.ResponseWriter, r *http.Request) {
 		// Get file content
 		file, _, err := r.FormFile("file")
 		switch err {
-		case nil:
+		case nil: 
 			defer func() {
 				if closeErr := file.Close(); closeErr != nil {
 					logger.Warn("failed to close uploaded file", zap.Error(closeErr))
@@ -260,121 +384,23 @@ func (h *Handler) AnalyzeLogHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract callers from log content and fetch source code files for enhanced context
-	logger.Info("Extracting callers from log content")
-	callers, err := h.operator.ExtractUniqueCallersFromContent(traceCtx, request.FileContent)
+	// Perform two-stage log analysis using shared method
+	analysisResult, err := h.performLogAnalysis(traceCtx, logger, request.FileContent, request.TriagePrompt, request.ExpertPrompts)
 	if err != nil {
-		// Non-blocking: log warning but continue without source code context
-		logger.Warn("Failed to extract callers from log content, continuing without source code context", zap.Error(err))
-		callers = []string{}
-	}
-
-	var sourceCodeContext string
-	if len(callers) > 0 {
-		logger.Info("Fetching source code files from GitHub", zap.Int("file_count", len(callers)), zap.Strings("files", callers))
-		fileContents, err := h.operator.GetFileContent(traceCtx, callers)
-		if err != nil {
-			// Non-blocking: log warning but continue without source code context
-			logger.Warn("Failed to fetch source code files, continuing without source code context", zap.Error(err))
-		} else if len(fileContents) > 0 {
-			// Format source code context
-			var contextBuilder strings.Builder
-			contextBuilder.WriteString("\n\n## Relevant Source Code Files\n\n")
-			contextBuilder.WriteString("The following source code files were referenced in the logs and may be relevant for analysis:\n\n")
-			for filename, content := range fileContents {
-				contextBuilder.WriteString(fmt.Sprintf("### File: %s\n\n```\n%s\n```\n\n", filename, content))
-			}
-			sourceCodeContext = contextBuilder.String()
-			logger.Info("Successfully fetched source code context", zap.Int("files_fetched", len(fileContents)))
-		}
-	}
-
-	// Stage 1: Triage Classification
-	logger.Info("Stage 1: Starting triage classification")
-	triagePrompt := request.TriagePrompt + "\n\n" + request.FileContent + "\n\n" + sourceCodeContext
-	triageReq := GeminiAPIRequest{
-		Contents: []Content{
-			{
-				Parts: []Part{
-					{Text: triagePrompt},
-				},
-			},
-		},
-	}
-
-	triageResponse, err := h.operator.Chat(traceCtx, triageReq)
-	if err != nil {
-		logger.Error("Stage 1 failed", zap.Error(err))
-		h.problemWriter.WriteError(traceCtx, w, fmt.Errorf("triage stage failed: %w", err), logger)
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
 		return
 	}
 
-	// Parse triage response
-	triageResult, err := ParseTriageResponse(triageResponse.Text)
-	if err != nil {
-		logger.Error("Failed to parse triage response", zap.Error(err), zap.String("response", triageResponse.Text))
-		h.problemWriter.WriteError(traceCtx, w, fmt.Errorf("failed to parse triage response: %w", err), logger)
-		return
-	}
-
-	logger.Info("Stage 1 completed",
-		zap.String("analysis_mode", string(triageResult.AnalysisMode)),
-		zap.Strings("detected_keywords", triageResult.DetectedKeywords),
-	)
-
-	// Stage 2: Expert Analysis
-	logger.Info("Stage 2: Starting expert analysis", zap.String("mode", string(triageResult.AnalysisMode)))
-	expertPrompt, err := GetExpertPrompt(request.ExpertPrompts, triageResult.AnalysisMode)
-	if err != nil {
-		logger.Error("Failed to get expert prompt", zap.Error(err), zap.String("mode", string(triageResult.AnalysisMode)))
-		h.problemWriter.WriteError(traceCtx, w, fmt.Errorf("failed to get expert prompt: %w", err), logger)
-		return
-	}
-
-	expertPromptWithContent := expertPrompt + "\n\n" + request.FileContent + "\n\n" + sourceCodeContext
-	expertReq := GeminiAPIRequest{
-		Contents: []Content{
-			{
-				Parts: []Part{
-					{Text: expertPromptWithContent},
-				},
-			},
-		},
-	}
-
-	expertResponse, err := h.operator.Chat(traceCtx, expertReq)
-	if err != nil {
-		logger.Error("Stage 2 failed", zap.Error(err))
-		h.problemWriter.WriteError(traceCtx, w, fmt.Errorf("expert analysis stage failed: %w", err), logger)
-		return
-	}
-
-	// Parse expert response into structured format
-	structuredAnalysis, parseErr := ParseExpertResponse(expertResponse.Text)
-	if parseErr != nil {
-		// Non-blocking: if parsing fails, return original text
-		logger.Warn("Failed to parse expert response into structured format, returning original text", zap.Error(parseErr))
-		structuredAnalysis = nil
-	}
-
-	// Return combined response
+	// Convert to map for response
 	result := map[string]interface{}{
 		"triage": map[string]interface{}{
-			"analysis_mode":     triageResult.AnalysisMode,
-			"detected_keywords": triageResult.DetectedKeywords,
-			"primary_error_log": triageResult.PrimaryErrorLog,
+			"analysis_mode":     analysisResult.Triage.AnalysisMode,
+			"detected_keywords": analysisResult.Triage.DetectedKeywords,
+			"primary_error_log": analysisResult.Triage.PrimaryErrorLog,
 		},
+		"expert_analysis":     analysisResult.ExpertAnalysis,
+		"expert_analysis_raw": analysisResult.ExpertAnalysisRaw,
 	}
-
-	// Include both structured and raw text for backward compatibility
-	if structuredAnalysis != nil {
-		result["expert_analysis"] = structuredAnalysis
-	} else {
-		// Fallback to original text format
-		result["expert_analysis"] = expertResponse.Text
-	}
-	// Always include raw text for reference
-	result["expert_analysis_raw"] = expertResponse.Text
 
 	// Write response JSON to analysis.json file
 	resultJSON, err := json.MarshalIndent(result, "", "  ")
@@ -443,45 +469,53 @@ func (h *Handler) ErrorReproducerHandler(w http.ResponseWriter, r *http.Request)
 	defer span.End()
 	logger := logutil.WithContext(traceCtx, h.logger)
 
-	// 1) Fetch the repo content as context
-	callers, err := h.operator.ExtractUniqueCallers(traceCtx)
+	// 1) Read log file content
+	logFilePath := "incident_0001_59e41abb.json" // Example: you can get this from request body
+	logContent, err := os.ReadFile(logFilePath)
 	if err != nil {
-		h.problemWriter.WriteError(traceCtx, w, err, logger)
+		h.problemWriter.WriteError(traceCtx, w, fmt.Errorf("failed to read log file: %w", err), logger)
 		return
 	}
-	contents, err := h.operator.GetFileContent(traceCtx, callers)
+
+	// 2) Load expert prompts from file
+	expertPromptsData, err := os.ReadFile("internal/gemini/prompts/generate_error_report_experts.txt")
+	if err != nil {
+		h.problemWriter.WriteError(traceCtx, w, fmt.Errorf("failed to read expert prompts: %w", err), logger)
+		return
+	}
+
+	var expertPrompts map[string][]string
+	if err := json.Unmarshal(expertPromptsData, &expertPrompts); err != nil {
+		h.problemWriter.WriteError(traceCtx, w, fmt.Errorf("failed to parse expert prompts: %w", err), logger)
+		return
+	}
+
+	// 3) Load triage prompt
+	triagePrompt, err := os.ReadFile("internal/gemini/prompts/generate_error_report_triage.txt")
+	if err != nil {
+		h.problemWriter.WriteError(traceCtx, w, fmt.Errorf("failed to read traige prompts: %w", err), logger)
+		return
+	}
+
+	// 4) Perform two-stage log analysis using shared method
+	analysisResult, err := h.performLogAnalysis(traceCtx, logger, string(logContent), string(triagePrompt), expertPrompts)
+	if err != nil {
+		h.problemWriter.WriteError(traceCtx, w, fmt.Errorf("log analysis failed: %w", err), logger)
+		return
+	}
+
+	logger.Info("Stage 2: Analysis completed",
+		zap.String("analysis_mode", string(analysisResult.Triage.AnalysisMode)),
+	)
+
+	// 5) Generate reproduction script based on analysis
+	logger.Info("Stage 3: Generating reproduction script")
+	scriptPrompt, err := h.operator.BuildPrompt(traceCtx, "internal/gemini/prompts/generate_script.txt", analysisResult.ExpertAnalysisRaw)
 	if err != nil {
 		h.problemWriter.WriteError(traceCtx, w, err, logger)
 		return
 	}
 
-	// Format contents map into a string for the prompt
-	var contentsBuilder strings.Builder
-	for filename, content := range contents {
-		contentsBuilder.WriteString(fmt.Sprintf("### File: %s\n\n```go\n%s\n```\n\n", filename, content))
-	}
-	formattedContents := contentsBuilder.String()
-
-	// 2) (ChatHandler) Ask the Gemini to generate an error analysis report with the contents and prompt.
-	reportPrompt, err := h.operator.BuildPrompt(traceCtx, ".prompts/generate_error_report.txt", formattedContents)
-	if err != nil {
-		h.problemWriter.WriteError(traceCtx, w, err, logger)
-		return
-	}
-	
-	reportText, err := h.operator.ChatText(traceCtx, reportPrompt)
-	if err != nil {
-		h.problemWriter.WriteError(traceCtx, w, err, logger)
-		return
-	}
-
-	// 3) (ChatHandler) Send the report and prompt to the Gemini.Transform the response into a script.
-	scriptPrompt, err := h.operator.BuildPrompt(traceCtx, ".prompts/generate_reproduction_script.txt", reportText.Text)
-	if err != nil {
-		h.problemWriter.WriteError(traceCtx, w, err, logger)
-		return
-	}
-	
 	scriptText, err := h.operator.ChatText(traceCtx, scriptPrompt)
 	if err != nil {
 		h.problemWriter.WriteError(traceCtx, w, err, logger)
@@ -495,28 +529,38 @@ func (h *Handler) ErrorReproducerHandler(w http.ResponseWriter, r *http.Request)
 	}
 	logger.Info("Go code written to file", zap.String("filePath", filePath))
 
-	// 4) Run the script and check if reproduce is needed.
+	// 6) Run the script and validate
+	logger.Info("Stage 4: Validating reproduction script")
 	var resp []RegenerateResponse
 	path := "scripts/auto_race_reproduction.go"
 	run, ev, err := h.operator.ValidateScriptRun(traceCtx, path)
 	if err != nil {
-		logger.Warn("failed to run script", zap.Error(err))
+		logger.Warn("Stage 4: First validation attempt failed", zap.Error(err))
 	}
 
 	resp = append(resp, RegenerateResponse{Attempt: 1, Run: run, Eval: ev})
 
-	// 5) Optional: (ChatHandler)
+	// 7) Retry if needed
 	if ev.NeedRetry {
+		logger.Info("Stage 4: Retrying script validation")
 		run, ev, err = h.operator.ValidateScriptRun(traceCtx, path)
 		if err != nil {
-			logger.Warn("failed to run script again", zap.Error(err))
+			logger.Warn("Stage 4: Second validation attempt failed", zap.Error(err))
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		resp = append(resp, RegenerateResponse{Attempt: 2, Run: run, Eval: ev})
 	}
+
+	// Return comprehensive response
 	handlerutil.WriteJSONResponse(w, http.StatusOK, map[string]any{
-		"script_path": filePath,
-		"attempts":    resp,
+		"triage": map[string]interface{}{
+			"analysis_mode":     analysisResult.Triage.AnalysisMode,
+			"detected_keywords": analysisResult.Triage.DetectedKeywords,
+			"primary_error_log": analysisResult.Triage.PrimaryErrorLog,
+		},
+		"expert_analysis": analysisResult.ExpertAnalysisRaw,
+		"script_path":     filePath,
+		"attempts":        resp,
 	})
 }
