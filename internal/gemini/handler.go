@@ -30,6 +30,8 @@ type RegenerateResponse struct {
 }
 
 type ChatOperator interface {
+	BuildPrompt(ctx context.Context, promptPath string, payload string) (string, error)
+	ChatText(ctx context.Context, text string) (Response, error)
 	Chat(ctx context.Context, req GeminiAPIRequest) (Response, error)
 	ExtractUniqueCallers(ctx context.Context) ([]string, error)
 	ExtractUniqueCallersFromContent(ctx context.Context, content string) ([]string, error)
@@ -126,14 +128,6 @@ func (h *Handler) ChatHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Write Go code to file if present in response
-		filePath, err := WriteCodeToFile(response, "scripts/auto_race_reproduction")
-		if err != nil {
-			logger.Warn("Failed to extract and write Go code to file", zap.Error(err))
-		} else {
-			logger.Info("Go code written to file", zap.String("filePath", filePath))
-		}
-
 		handlerutil.WriteJSONResponse(w, http.StatusOK, response)
 		return
 	}
@@ -158,14 +152,6 @@ func (h *Handler) ChatHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.problemWriter.WriteError(traceCtx, w, err, logger)
 		return
-	}
-
-	// Write Go code to file if present in response
-	filePath, err := WriteCodeToFile(response, "scripts/auto_race_reproduction")
-	if err != nil {
-		logger.Warn("Failed to extract and write Go code to file", zap.Error(err))
-	} else {
-		logger.Info("Go code written to file", zap.String("filePath", filePath))
 	}
 
 	handlerutil.WriteJSONResponse(w, http.StatusOK, response)
@@ -450,4 +436,87 @@ func (h *Handler) RegenerateHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	handlerutil.WriteJSONResponse(w, http.StatusOK, resp)
+}
+
+func (h *Handler) ErrorReproducerHandler(w http.ResponseWriter, r *http.Request) {
+	traceCtx, span := h.tracer.Start(r.Context(), "ErrorReproducerHandler")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, h.logger)
+
+	// 1) Fetch the repo content as context
+	callers, err := h.operator.ExtractUniqueCallers(traceCtx)
+	if err != nil {
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
+		return
+	}
+	contents, err := h.operator.GetFileContent(traceCtx, callers)
+	if err != nil {
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
+		return
+	}
+
+	// Format contents map into a string for the prompt
+	var contentsBuilder strings.Builder
+	for filename, content := range contents {
+		contentsBuilder.WriteString(fmt.Sprintf("### File: %s\n\n```go\n%s\n```\n\n", filename, content))
+	}
+	formattedContents := contentsBuilder.String()
+
+	// 2) (ChatHandler) Ask the Gemini to generate an error analysis report with the contents and prompt.
+	reportPrompt, err := h.operator.BuildPrompt(traceCtx, ".prompts/generate_error_report.txt", formattedContents)
+	if err != nil {
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
+		return
+	}
+	
+	reportText, err := h.operator.ChatText(traceCtx, reportPrompt)
+	if err != nil {
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
+		return
+	}
+
+	// 3) (ChatHandler) Send the report and prompt to the Gemini.Transform the response into a script.
+	scriptPrompt, err := h.operator.BuildPrompt(traceCtx, ".prompts/generate_reproduction_script.txt", reportText.Text)
+	if err != nil {
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
+		return
+	}
+	
+	scriptText, err := h.operator.ChatText(traceCtx, scriptPrompt)
+	if err != nil {
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
+		return
+	}
+
+	filePath, err := WriteCodeToFile(scriptText, "scripts/auto_race_reproduction")
+	if err != nil {
+		h.problemWriter.WriteError(traceCtx, w, err, logger)
+		return
+	}
+	logger.Info("Go code written to file", zap.String("filePath", filePath))
+
+	// 4) Run the script and check if reproduce is needed.
+	var resp []RegenerateResponse
+	path := "scripts/auto_race_reproduction.go"
+	run, ev, err := h.operator.ValidateScriptRun(traceCtx, path)
+	if err != nil {
+		logger.Warn("failed to run script", zap.Error(err))
+	}
+
+	resp = append(resp, RegenerateResponse{Attempt: 1, Run: run, Eval: ev})
+
+	// 5) Optional: (ChatHandler)
+	if ev.NeedRetry {
+		run, ev, err = h.operator.ValidateScriptRun(traceCtx, path)
+		if err != nil {
+			logger.Warn("failed to run script again", zap.Error(err))
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		resp = append(resp, RegenerateResponse{Attempt: 2, Run: run, Eval: ev})
+	}
+	handlerutil.WriteJSONResponse(w, http.StatusOK, map[string]any{
+		"script_path": filePath,
+		"attempts":    resp,
+	})
 }

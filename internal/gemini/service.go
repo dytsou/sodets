@@ -51,7 +51,6 @@ type RunScriptResult struct {
 	StdoutTail string
 	StderrTail string
 
-	// 如果你之後要做「最後一行 JSON summary」也可以先留欄位
 	LastNonEmptyStdoutLine string
 }
 
@@ -71,6 +70,44 @@ func NewService(logger *zap.Logger, apiKey string, logPath string) *Service {
 		logPath: logPath,
 		client:  &http.Client{},
 	}
+}
+
+func (s *Service) BuildPrompt(ctx context.Context, promptPath string, payload string) (string, error) {
+	traceCtx, span := s.tracer.Start(ctx, "BuildPrompt")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, s.logger)
+
+	b, err := os.ReadFile(promptPath)
+	if err != nil {
+		logger.Error("failed to read prompt template", zap.String("path", promptPath), zap.Error(err))
+		span.RecordError(err)
+		return "", err
+	}
+
+	tpl := string(b)
+
+	// MVP：template + "\n\n" + payload
+	// if needed, can change to strings.Replace(tpl, "{{INPUT}}", payload, 1)
+	combined := tpl
+	if strings.TrimSpace(combined) != "" && strings.TrimSpace(payload) != "" {
+		combined += "\n\n"
+	}
+	combined += payload
+
+	return combined, nil
+}
+
+func (s *Service) ChatText(ctx context.Context, text string) (Response, error) {
+	req := GeminiAPIRequest{
+		Contents: []Content{
+			{Parts: []Part{{Text: text}}},
+		},
+	}
+	resp, err := s.Chat(ctx, req)
+	if err != nil {
+		return Response{}, err
+	}
+	return resp, nil
 }
 
 // Chat sends a request to the Gemini API and returns the response
@@ -161,6 +198,7 @@ func (s *Service) Chat(ctx context.Context, req GeminiAPIRequest) (Response, err
 	return response, nil
 }
 
+// ExtractUniqueCallers extract callers from the Grafana log
 func (s *Service) ExtractUniqueCallers(ctx context.Context) ([]string, error) {
 	_, span := s.tracer.Start(ctx, "ExtractUniqueCallers")
 	defer span.End()
@@ -175,73 +213,39 @@ func (s *Service) ExtractUniqueCallers(ctx context.Context) ([]string, error) {
 
 	var incident Incident
 	if err := json.Unmarshal(content, &incident); err != nil {
-		logger.Error("failed to unmarshal log file", zap.Error(err))
-		span.RecordError(err)
-		return nil, err
+		return nil, fmt.Errorf("unmarshal incident json: %w", err)
 	}
 
 	callersSet := make(map[string]struct{})
 
-	for _, entry := range incident.Timeline {
-		var msg LogMessage
-
-		// Handle different timeline formats
-		switch v := entry.(type) {
-		case string:
-			// New format: entry is a JSON string directly (e.g., incident_0001_59e41abb-full.json)
-			err := json.Unmarshal([]byte(v), &msg)
-			if err != nil {
-				continue
-			}
-		case map[string]interface{}:
-			// Old format: entry is an object with details.message
-			details, ok := v["details"].(map[string]interface{})
-			if !ok {
-				continue
-			}
-			message, ok := details["message"].(string)
-			if !ok || message == "" {
-				continue
-			}
-			err := json.Unmarshal([]byte(message), &msg)
-			if err != nil {
-				continue
-			}
-		default:
-			// Try to unmarshal as old format TimelineEntry
-			entryBytes, err := json.Marshal(entry)
-			if err != nil {
-				continue
-			}
-			var timelineEntry TimelineEntry
-			if err := json.Unmarshal(entryBytes, &timelineEntry); err != nil {
-				continue
-			}
-			if timelineEntry.Details == nil || timelineEntry.Details.Message == "" {
-				continue
-			}
-			err = json.Unmarshal([]byte(timelineEntry.Details.Message), &msg)
-			if err != nil {
-				continue
-			}
+	for _, line := range incident.Timeline {
+		prefix := ""
+		rest := strings.TrimSpace(strings.TrimPrefix(line.(string), prefix))
+		i := strings.Index(rest, "{")
+		if i < 0 {
+			continue
 		}
+		jsonPart := strings.TrimSpace(rest[i:])
 
-		// Extract filename from caller
-		if msg.Caller == "" {
+		var e LogMessage
+		if err := json.Unmarshal([]byte(jsonPart), &e); err != nil {
+			continue
+		}
+		if e.Caller == "" {
 			continue
 		}
 
-		parts := strings.Split(msg.Caller, ":")
-		filename := parts[0]
-		callersSet[filename] = struct{}{}
+		if i := strings.LastIndex(e.Caller, ":"); i > 0 {
+			callersSet[e.Caller[:i]] = struct{}{}
+		}
 	}
 
 	callers := make([]string, 0, len(callersSet))
 	for c := range callersSet {
 		callers = append(callers, c)
 	}
-	sort.Strings(callers)
 
+	sort.Strings(callers)
 	return callers, nil
 }
 

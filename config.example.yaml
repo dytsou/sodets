@@ -42,4 +42,5 @@ google_oauth:
 # Gemini API key
 gemini_api_key: "your-gemini-api-key"
 
-err_log_path: "incident_0001_59e41abb-full.json"
+# Error Log file path
+err_log_path: "errorlogs/incident_0001_59e41abb.json"
