@@ -145,4 +145,4 @@ bin
 config.yaml
 .env
 
-scripts/
+*.local.toml
