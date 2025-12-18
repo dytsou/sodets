@@ -402,7 +402,7 @@ func (s *Service) GetFileContent(ctx context.Context, filenames []string) (map[s
 	return files, nil
 }
 
-// classifyFailure classifies the failure type based on the output string 
+// classifyFailure classifies the failure type based on the output string
 func classifyFailure(out string) FailureType {
 	s := out
 
@@ -440,10 +440,9 @@ func classifyFailure(out string) FailureType {
 	return FailureRuntime
 }
 
-
-// ValidateScriptRun check exit code/timeout first, then check output for expected error patterns or marker
+// ValidateScript check exit code/timeout first, then check output for expected error patterns or marker
 // expectedErrors: slice of error messages/patterns to look for in output (empty means use default marker)
-func (s *Service) ValidateScriptRun(ctx context.Context, path string, expectedErrors []string) (RunScriptResult, EvaluateResult, error) {
+func (s *Service) ValidateScript(ctx context.Context, path string, expectedErrors []string) (RunScriptResult, EvaluateResult, error) {
 	run, err := s.RunScript(ctx, path, RunScriptOptions{})
 	if err != nil {
 		return RunScriptResult{}, EvaluateResult{}, err
@@ -451,7 +450,7 @@ func (s *Service) ValidateScriptRun(ctx context.Context, path string, expectedEr
 
 	out := run.Stdout + "\n" + run.Stderr
 
-	// 0) timeout（這通常不是「rethink」，而是 tune：加 timeout / 降低輸出 / 調整負載）
+	// 0) timeout
 	if run.TimedOut {
 		return run, EvaluateResult{
 			Reproduced: false,
@@ -497,7 +496,7 @@ func (s *Service) ValidateScriptRun(ctx context.Context, path string, expectedEr
 	// 2) exit 0：inspect error message or the marker
 	reproduced := false
 	matchedErrors := []string{}
-	
+
 	if len(expectedErrors) > 0 {
 		for _, expectedErr := range expectedErrors {
 			if strings.Contains(out, expectedErr) {
@@ -529,7 +528,7 @@ func (s *Service) ValidateScriptRun(ctx context.Context, path string, expectedEr
 		}
 	}
 
-	// 3) exit 0 但沒 marker：先 rerun/tune，再到 rethink（由上層 attempt 決定）
+	// 3) exit 0
 	return run, EvaluateResult{
 		Reproduced: false,
 		NeedRetry:  true,
@@ -538,8 +537,6 @@ func (s *Service) ValidateScriptRun(ctx context.Context, path string, expectedEr
 		Next:       ActionRerun,
 	}, nil
 }
-
-
 
 func (s *Service) RunScript(ctx context.Context, path string, opt RunScriptOptions) (RunScriptResult, error) {
 	traceCtx, span := s.tracer.Start(ctx, "RunScript")
@@ -646,4 +643,124 @@ func lastNonEmptyLine(s string) string {
 		}
 	}
 	return ""
+}
+
+func (s *Service) Retry(ctx context.Context, path string, marker []string) ([]RegenerateResponse, error) {
+	traceCtx, span := s.tracer.Start(ctx, "Retry")
+	defer span.End()
+	logger := logutil.WithContext(traceCtx, s.logger)
+
+	const maxAttempts = 3
+	resp := make([]RegenerateResponse, 0, maxAttempts)
+
+	// First validation attempt
+	run, ev, err := s.ValidateScript(traceCtx, path, marker)
+	if err != nil {
+		logger.Warn("Attempt 1: Validation failed", zap.Error(err))
+	}
+	resp = append(resp, RegenerateResponse{Attempt: 1, Run: run, Eval: ev})
+
+	// Retry loop
+	for attemptNum := 2; attemptNum <= maxAttempts && ev.NeedRetry; attemptNum++ {
+		logger.Info("Starting retry attempt",
+			zap.Int("attempt", attemptNum),
+			zap.Int("max_attempts", maxAttempts),
+			zap.String("next_action", string(ev.Next)),
+		)
+
+		var retryScriptText Response
+
+		switch ev.Next {
+		case ActionFixScript:
+			// Handle compilation/build errors
+			logger.Info("Using FIX_SCRIPT strategy", zap.Int("attempt", attemptNum))
+			currentScript, _ := os.ReadFile(path)
+			fixParams := FixScriptParams{
+				Stderr:        run.Stderr,
+				CurrentScript: string(currentScript),
+			}
+			fixPrompt, err := s.BuildPromptWithParams(traceCtx, "internal/gemini/prompts/fix_script.txt", fixParams.ToMap())
+			if err != nil {
+				logger.Error("Failed to build fix_script prompt", zap.Error(err), zap.Int("attempt", attemptNum))
+				return resp, err
+			}
+			retryScriptText, err = s.ChatText(traceCtx, fixPrompt)
+			if err != nil {
+				logger.Error("Failed to generate fixed script", zap.Error(err), zap.Int("attempt", attemptNum))
+				return resp, err
+			}
+
+		case ActionRethink:
+			// Handle reproduction strategy issues
+			logger.Info("Using RETHINK strategy", zap.Int("attempt", attemptNum))
+			currentScript, _ := os.ReadFile(path)
+
+			// Build summary of previous attempts
+			prevAttempts := fmt.Sprintf("Previous attempts: %d", attemptNum-1)
+			for _, r := range resp {
+				prevAttempts += fmt.Sprintf("\n- Attempt %d: ExitCode=%d, Reproduced=%v, Reason=%s",
+					r.Attempt, r.Run.ExitCode, r.Eval.Reproduced, r.Eval.Reason)
+			}
+
+			rethinkParams := RethinkScriptParams{
+				ExpectedKeywords:     "tenant not found, nil UUID, 00000000-0000-0000-0000-000000000000",
+				ExpectedEndpoints:    "/api/orgs/:slug",
+				ExpectedErrorPattern: "unable to find tenants with id '00000000-0000-0000-0000-000000000000'",
+				RunSummary:           prevAttempts,
+				ObservationNotes:     ev.Reason,
+				CurrentScript:        string(currentScript),
+			}
+			rethinkPrompt, err := s.BuildPromptWithParams(traceCtx, "internal/gemini/prompts/rethink_script.txt", rethinkParams.ToMap())
+			if err != nil {
+				logger.Error("Failed to build rethink_script prompt", zap.Error(err), zap.Int("attempt", attemptNum))
+				return resp, err
+			}
+			retryScriptText, err = s.ChatText(traceCtx, rethinkPrompt)
+			if err != nil {
+				logger.Error("Failed to generate rethought script", zap.Error(err), zap.Int("attempt", attemptNum))
+				return resp, err
+			}
+
+		default:
+			// Simple rerun or unknown action
+			logger.Info("Rerunning without modification", zap.Int("attempt", attemptNum))
+			run, ev, err := s.ValidateScript(traceCtx, path, marker)
+			if err != nil {
+				logger.Warn("Validation attempt failed", zap.Error(err), zap.Int("attempt", attemptNum))
+			}
+			resp = append(resp, RegenerateResponse{Attempt: attemptNum, Run: run, Eval: ev})
+			continue
+		}
+
+		// Write the regenerated script
+		if retryScriptText.Text != "" {
+			newFilePath, err := WriteCodeToFile(retryScriptText, "scripts/auto_race_reproduction")
+			if err != nil {
+				logger.Error("Failed to write regenerated script", zap.Error(err), zap.Int("attempt", attemptNum))
+				return resp, err
+			}
+			logger.Info("Regenerated script written",
+				zap.String("path", newFilePath),
+				zap.Int("attempt", attemptNum),
+			)
+
+			// Update path to the new script
+			path = newFilePath
+
+			// Validate the regenerated script
+			run, ev, err := s.ValidateScript(traceCtx, path, marker)
+			if err != nil {
+				logger.Warn("Validation attempt failed", zap.Error(err), zap.Int("attempt", attemptNum))
+			}
+			resp = append(resp, RegenerateResponse{Attempt: attemptNum, Run: run, Eval: ev})
+
+			// Log success if reproduced
+			if ev.Reproduced {
+				logger.Info("Successfully reproduced error!", zap.Int("attempt", attemptNum))
+				break
+			}
+		}
+	}
+
+	return resp, nil
 }
