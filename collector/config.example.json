@@ -9,5 +9,6 @@
   "scan_settings": {
     "context_window_seconds": 1,
     "max_concurrent_tasks": 5
-  }
+  },
+  "output_directory": "../observability-data"
 }

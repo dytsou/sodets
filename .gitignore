@@ -144,3 +144,5 @@ bin
 
 config.yaml
 .env
+
+scripts/

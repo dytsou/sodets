@@ -55,12 +55,12 @@ class Incident:
     context_requests: List[str] = field(default_factory=list)
 
 # --- 工具函數 ---
-def load_config(config_path: str) -> Dict[str, Any]:
+def load_config(config_input: str) -> Dict[str, Any]:
+    """Load config from JSON string"""
     try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
+        return json.loads(config_input)
     except Exception as e:
-        logger.error(f"Config load error: {e}")
+        logger.error(f"Config parse error: {e}")
         sys.exit(1)
 
 def parse_time(time_str: str) -> datetime:
@@ -672,13 +672,18 @@ async def process_incident(client: httpx.AsyncClient, incident: Incident, labels
     return incident
 
 async def main():
-    config = load_config("config.json")
+    # Read config from stdin
+    logger.info("Reading configuration from stdin...")
+    config_input = sys.stdin.read()
+    config = load_config(config_input)
+
     labels = config.get("labels", {})
     scan_settings = config.get("scan_settings", {})
     start_time = parse_time(config["time_range"]["start"])
     end_time = parse_time(config["time_range"]["end"])
     max_concurrent_tasks = scan_settings.get("max_concurrent_tasks", 5)
     context_window_sec = scan_settings.get("context_window_seconds", 1)
+    output_dir = config.get("output_directory", "../observability-data")
     
     async with httpx.AsyncClient(timeout=30.0) as client:
         raw_events = await scan_for_errors(client, labels, start_time, end_time, None)
@@ -688,79 +693,64 @@ async def main():
         
         logger.info(f"[Phase 1] Identified {len(unique_incidents)} unique incidents.")
         
-        tasks = []
-        semaphore = asyncio.Semaphore(max_concurrent_tasks)
-        filtered_incidents = []
-        for inc in unique_incidents.values():
-            should_fetch = True
-            for existing_inc in filtered_incidents:
-                if existing_inc.timestamp - timedelta(seconds=context_window_sec) <= inc.timestamp <= existing_inc.timestamp:
-                    should_fetch = False
-                    break
-            if should_fetch: filtered_incidents.append(inc)
-
-        async def sem_task(inc):
-            async with semaphore: return await process_incident(client, inc, labels, context_window_sec)
-
-        for incident in filtered_incidents:
-            tasks.append(sem_task(incident))
+        if not unique_incidents:
+            logger.warning("No incidents found.")
+            return
         
-        enriched_incidents = await asyncio.gather(*tasks) if tasks else []
-        logger.info(f"[Phase 2] Processed {len(enriched_incidents)} incidents.")
+        # Find the incident closest to end_time
+        closest_incident = min(
+            unique_incidents.values(),
+            key=lambda inc: abs((inc.timestamp - end_time).total_seconds())
+        )
+        logger.info(f"Selected incident closest to end_time: {closest_incident.trace_id} at {closest_incident.timestamp}")
+        
+        # Process only the closest incident
+        enriched_incident = await process_incident(client, closest_incident, labels, context_window_sec)
+        logger.info(f"[Phase 2] Processed incident {enriched_incident.trace_id}.")
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    output_dir = f"incident_report_{timestamp}"
-    os.makedirs(output_dir, exist_ok=True)
     
-    with open(os.path.join(output_dir, "meta.json"), 'w', encoding='utf-8') as f:
-        json.dump({
-            "task": config.get("task_name"),
-            "scan_range": f"{start_time} - {end_time}",
-            "total_incidents": len(enriched_incidents),
-            "generated_at": timestamp
-        }, f, indent=2, ensure_ascii=False)
-    
-    for idx, inc in enumerate(enriched_incidents, 1):
-        trigger_req_data = None
-        if inc.trigger_request:
-            trigger_req_data = {
-                "method": inc.trigger_request.method,
-                "endpoint": inc.trigger_request.endpoint,
-                "query_params": inc.trigger_request.query_params,
-                "duration_ms": inc.trigger_request.duration_ms,
-            }
-        
-        serializable_context_logs = []
-        for log in inc.context_logs:
-            sl = dict(log)
-            if "timestamp" in sl and isinstance(sl["timestamp"], datetime): sl["timestamp"] = str(sl["timestamp"])
-            serializable_context_logs.append(sl)
-        
-        # --- [修改] 3. 使用 simplify_trace_for_llm 轉換格式 ---
-        llm_trace_view = simplify_trace_for_llm(
-            inc.trace_detail,
-            inc.trace_logs)
-        
-        incident_data = {
-            "incident_summary": {
-                "trace_id": inc.trace_id,
-                "timestamp": str(inc.timestamp),
-                "service_name": config.get("labels", {}).get("service_name", "unknown"),
-                "error_log": filter_log_fields(inc.error_log)
-            },
-            "trigger_request": trigger_req_data,
-            "context_requests": inc.context_requests,
-            "timeline": inc.timeline,
-            "trace_dump": llm_trace_view,
-            # "raw_trace": inc.trace_detail # 如果需要保留原始 JSON 可解開此行
+    trigger_req_data = None
+    if enriched_incident.trigger_request:
+        trigger_req_data = {
+            "method": enriched_incident.trigger_request.method,
+            "endpoint": enriched_incident.trigger_request.endpoint,
+            "query_params": enriched_incident.trigger_request.query_params,
+            "duration_ms": enriched_incident.trigger_request.duration_ms,
         }
-        
-        trace_id_short = inc.trace_id[:8]
-        filename_full = f"incident_{idx:04d}_{trace_id_short}.json"
-        with open(os.path.join(output_dir, filename_full), 'w', encoding='utf-8') as f:
-            json.dump(incident_data, f, indent=2, ensure_ascii=False)
     
-    logger.info(f"Report generated in directory: {output_dir}/")
+    llm_trace_view = simplify_trace_for_llm(
+        enriched_incident.trace_detail,
+        enriched_incident.trace_logs)
+    
+    incident_data = {
+        "incident_summary": {
+            "trace_id": enriched_incident.trace_id,
+            "timestamp": str(enriched_incident.timestamp),
+            "service_name": config.get("labels", {}).get("service_name", "unknown"),
+            "error_log": filter_log_fields(enriched_incident.error_log)
+        },
+        "trigger_request": trigger_req_data,
+        "context_requests": enriched_incident.context_requests,
+        "timeline": enriched_incident.timeline,
+        "trace_dump": llm_trace_view,
+    }
+    
+    trace_id_short = enriched_incident.trace_id[:8]
+    output_filename = f"incident_{timestamp}_{trace_id_short}.json"
+    output_filepath = os.path.join(output_dir, output_filename)
+
+    os.makedirs(os.path.dirname(output_filepath), exist_ok=True)
+    
+    with open(output_filepath, 'w', encoding='utf-8') as f:
+        json.dump(incident_data, f, indent=2, ensure_ascii=False)
+    
+    # Output absolute path as JSON to stdout
+    absolute_path = os.path.abspath(output_filepath)
+    output_result = {"output_file": absolute_path}
+    print(json.dumps(output_result, ensure_ascii=False))
+    
+    logger.info(f"Report generated: {output_filename}")
 
 if __name__ == "__main__":
     asyncio.run(main())

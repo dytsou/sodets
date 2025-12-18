@@ -35,6 +35,10 @@ type Config struct {
 	ErrLogPath                string        `yaml:"err_log_path"   envconfig:"ERR_LOG_PATH"`
 	AccessTokenExpiration     time.Duration `yaml:"-"`
 	RefreshTokenExpiration    time.Duration `yaml:"-"`
+	PythonPath                string        `yaml:"python_path"        envconfig:"PYTHON_PATH"`
+	GrafanaScriptPath         string        `yaml:"grafana_script_path" envconfig:"GRAFANA_SCRIPT_PATH"`
+	ObservabilityDataPath     string        `yaml:"observability_data_path" envconfig:"OBSERVABILITY_DATA_PATH"`
+
 }
 
 type LogBuffer struct {
@@ -115,14 +119,17 @@ func Load() (Config, *LogBuffer) {
 	config := &Config{
 		Debug:                     false,
 		Dev:                       false,
-		Host:                      "localhost",
-		Port:                      "8080",
+		Host:                      "0.0.0.0",
+		Port:                      "8081",
 		Secret:                    DefaultSecret,
 		AccessTokenExpirationStr:  "15m",
 		RefreshTokenExpirationStr: "720h",
 		OtelCollectorUrl:          "",
 		GeminiAPIKey:              "",
 		ErrLogPath:                "",
+		PythonPath:                "python3",
+		GrafanaScriptPath:         "/app/collector/main.py",
+		ObservabilityDataPath:     "/app/observability-data",
 	}
 
 	var err error
@@ -191,6 +198,9 @@ func FromEnv(config *Config, logger *LogBuffer) (*Config, error) {
 		Secret:            os.Getenv("SECRET"),
 		OtelCollectorUrl:  os.Getenv("OTEL_COLLECTOR_URL"),
 		GeminiAPIKey:      os.Getenv("GEMINI_API_KEY"),
+		PythonPath:     os.Getenv("PYTHON_PATH"),
+		GrafanaScriptPath: os.Getenv("GRAFANA_SCRIPT_PATH"),
+		ObservabilityDataPath: os.Getenv("OBSERVABILITY_DATA_PATH"),
 	}
 
 	return configutil.Merge[Config](config, envConfig)
@@ -207,6 +217,9 @@ func FromFlags(config *Config) (*Config, error) {
 	flag.StringVar(&flagConfig.Secret, "secret", "", "secret")
 	flag.StringVar(&flagConfig.OtelCollectorUrl, "otel_collector_url", "", "OpenTelemetry collector URL")
 	flag.StringVar(&flagConfig.GeminiAPIKey, "gemini_api_key", "", "Gemini API key")
+	flag.StringVar(&flagConfig.PythonPath, "python_path", "", "Path to the Python interpreter")
+	flag.StringVar(&flagConfig.GrafanaScriptPath, "grafana_script_path", "", "Path to the Grafana analysis script")
+	flag.StringVar(&flagConfig.ObservabilityDataPath, "observability_data_path", "", "Path to store observability data")
 
 	flag.Parse()
 
