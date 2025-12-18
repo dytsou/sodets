@@ -8,7 +8,7 @@ on:
 
 jobs:
   Lint:
-    runs-on:  ubuntu-latest
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -16,7 +16,7 @@ jobs:
       - name: Setup go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: "1.24"
 
       - name: Lint
         uses: golangci/golangci-lint-action@v7
@@ -32,24 +32,19 @@ jobs:
       - name: Setup go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
-
-      - name: Setup Sqlc
-        uses: sqlc-dev/setup-sqlc@v4
-        with:
-          sqlc-version: '1.28.0'
+          go-version: "1.24"
 
       - name: Setup mockery
         uses: brokeyourbike/go-mockery-action@v0
         with:
-          mockery-version: '2.53.3'
+          mockery-version: "2.53.3"
 
       - name: Test
         run: make test
 
   Build:
     needs: Test
-    runs-on:  ubuntu-latest
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -57,17 +52,12 @@ jobs:
       - name: Setup go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
-
-      - name: Setup Sqlc
-        uses: sqlc-dev/setup-sqlc@v4
-        with:
-          sqlc-version: '1.25.0'
+          go-version: "1.24"
 
       - name: Setup mockery
         uses: brokeyourbike/go-mockery-action@v0
         with:
-          mockery-version: '2.53.3'
+          mockery-version: "2.53.3"
 
       - name: Build
         run: |
@@ -78,18 +68,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_REGISTRY_USERNAME }}
-          password: ${{ secrets.DOCKER_REGISTRY_TOKEN }}
-
-      - name: Build and Push Docker image
+      - name: Build Docker image (no push)
         uses: docker/build-push-action@v6
         with:
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          push: true
+          push: false
           tags: |
             nycusdc/core-system-backend:pr-${{ github.event.number }}
             nycusdc/core-system-backend:${{ github.sha }}
@@ -104,7 +88,7 @@ jobs:
         id: extract
         with:
           pr_body: ${{ github.event.pull_request.body }}
-      
+
       - name: Process PR body for webhook
         run: |
           PR_TYPE=$(echo '${{ steps.extract.outputs.type_block }}' | jq -R -s @json)
