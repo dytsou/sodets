@@ -1,9 +1,0 @@
-# vector.toml
-[sources.stdin]
-type = "stdin"
-decoding.codec = "json"
-
-[sinks.to_console]
-type = "console"
-inputs = ["stdin"]
-encoding.codec = "json"
