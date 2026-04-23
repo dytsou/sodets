@@ -1,6 +1,6 @@
 name: Release
 
-on:
+"on":
   push:
     branches:
       - main
@@ -18,12 +18,22 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+          cache: true
 
-      - name: Lint
+      - name: "Lint"
+        id: golangci_lint_binary
+        uses: golangci/golangci-lint-action@v7
+        continue-on-error: true
+        with:
+          version: v2.0.2
+          install-mode: binary
+
+      - name: "Lint (fallback: goinstall)"
+        if: steps.golangci_lint_binary.outcome == 'failure'
         uses: golangci/golangci-lint-action@v7
         with:
-          install-mode: goinstall
           version: v2.0.2
+          install-mode: goinstall
 
   Test:
     needs: Lint
