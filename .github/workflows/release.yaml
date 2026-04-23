@@ -25,7 +25,7 @@ jobs:
         uses: golangci/golangci-lint-action@v7
         continue-on-error: true
         with:
-          version: v2.0.2
+          version: v2.11.4
           install-mode: binary
 
       - name: "Lint (fallback: goinstall)"
