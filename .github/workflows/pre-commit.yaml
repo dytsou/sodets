@@ -41,7 +41,8 @@ jobs:
       - name: Lint
         uses: golangci/golangci-lint-action@v7
         with:
-          version: v2.0
+          install-mode: goinstall
+          version: v2.0.2
 
   Test:
     needs: check-if-in-pr
