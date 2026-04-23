@@ -96,11 +96,11 @@ func (h *Handler) performLogAnalysis(ctx context.Context, logger *zap.Logger, lo
 			logger.Warn("Failed to fetch source code files, continuing without source code context", zap.Error(err))
 		} else if len(fileContents) > 0 {
 			// Format source code context
-			var contextBuilder strings.Builder
-			contextBuilder.WriteString("\n\n## Relevant Source Code Files\n\n")
-			contextBuilder.WriteString("The following source code files were referenced in the logs and may be relevant for analysis:\n\n")
+			contextBuilder := strings.Builder{}
+			fmt.Fprint(&contextBuilder, "\n\n## Relevant Source Code Files\n\n")
+			fmt.Fprint(&contextBuilder, "The following source code files were referenced in the logs and may be relevant for analysis:\n\n")
 			for filename, content := range fileContents {
-				contextBuilder.WriteString(fmt.Sprintf("### File: %s\n\n```\n%s\n```\n\n", filename, content))
+				fmt.Fprintf(&contextBuilder, "### File: %s\n\n```\n%s\n```\n\n", filename, content)
 			}
 			sourceCodeContext = contextBuilder.String()
 			logger.Info("Successfully fetched source code context", zap.Int("files_fetched", len(fileContents)))
