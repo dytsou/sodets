@@ -40,19 +40,10 @@ jobs:
           cache: true
 
       - name: "Lint"
-        id: golangci_lint_binary
         uses: golangci/golangci-lint-action@v7
-        continue-on-error: true
         with:
           version: v2.11.4
           install-mode: binary
-
-      - name: "Lint (fallback: goinstall)"
-        if: steps.golangci_lint_binary.outcome == 'failure'
-        uses: golangci/golangci-lint-action@v7
-        with:
-          version: v2.0.2
-          install-mode: goinstall
 
   Test:
     needs: check-if-in-pr
